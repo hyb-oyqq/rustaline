@@ -83,6 +83,13 @@ JWT 密钥启动时强制校验（`config.rs::validate_jwt_secret`，在 main.rs
 - 修改 PoW TTL 时，防重放消费记录必须覆盖签名令牌的剩余有效期，不能用新缩短的设置提前过期。
 - SDK 每次提交前刷新验证码、邮件开关及正文上限（公共配置 comment_max_length），按 Unicode 字符计数，网络失败保留草稿；后台和 SDK 新文案仍必须中英双语。
 
+## Turnstile 评论防护
+
+- `comment.captcha.turnstile` 独立开关，默认关闭；与 PoW/图形码同开为 AND。模式为 `invisible`、`managed`、`click`；click 表示 SDK 必须点击按钮启动验证，Cloudflare Managed 是否额外勾选仍由服务决定。
+- Secret Key 单独加密存入 `app_settings.turnstile_secret_ciphertext`，不进入 content JSON、响应、日志或 Debug；PATCH 省略/空值保留，无清除按钮。JWT 轮换解密失败保持 enabled 且拒绝受保护提交，允许后台修复。
+- 公共配置只公开 enabled/mode/site_key；评论提交带 `turnstile_token`，后端固定 Siteverify、10 秒超时、禁重定向，严格校验 success/action=comment/hostname 白名单；蜜罐和前置验证码失败不外呼，失败不能绕过或入队。
+- SDK 只按需加载官方脚本，每实例 widget/token 隔离；图形码及 PoW 后再取 token，token 不重复使用，取消/错误保留草稿，不自动重复 POST。隐藏模式必须使用 Invisible 组件，不用 CSS 隐藏 Managed 交互 iframe。
+
 ## mdui vendor 管理
 
 - 版本固定：`static/vendor/mdui/VERSION` 当前为 `2.1.5`；不得直接修改 vendor 文件。
