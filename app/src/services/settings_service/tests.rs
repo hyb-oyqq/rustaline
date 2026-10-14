@@ -2,6 +2,256 @@ use super::*;
 use migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, PaginatorTrait, Statement};
 
+fn turnstile_patch(revision: i64, value: serde_json::Value) -> SettingsPatchRequest {
+    serde_json::from_value(serde_json::json!({
+        "revision": revision, "comment": {"captcha": {"turnstile": value}}
+    }))
+    .unwrap()
+}
+
+fn enabled_turnstile() -> serde_json::Value {
+    serde_json::json!({"enabled": true, "mode": "managed", "site_key": "site-key",
+        "secret_key": "  private-value  ", "hostnames": [" Comments.Example.com ", "comments.example.com"]})
+}
+
+#[tokio::test]
+async fn turnstile_secret_is_independent_random_and_preserved() {
+    let db = database().await;
+    let mut config = bootstrap();
+    config.mail.username = "user".into();
+    config.mail.password = "  private-value  ".into();
+    initialize(&db, &config).await.unwrap();
+    let first = update(
+        &db,
+        &config.jwt.secret,
+        turnstile_patch(1, enabled_turnstile()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        first.comment.captcha.turnstile.secret_key,
+        "  private-value  "
+    );
+    assert_eq!(
+        first.comment.captcha.turnstile.hostnames,
+        ["comments.example.com"]
+    );
+    assert!(!format!("{first:?}").contains("private-value"));
+    let stored = row(&db).await.unwrap();
+    assert!(!stored.content.contains("private-value"));
+    assert!(!stored.content.contains("secret"));
+    let cipher = stored.turnstile_secret_ciphertext.unwrap();
+    assert!(settings_crypto::decrypt(&cipher, &config.jwt.secret).is_none());
+    assert!(
+        settings_crypto::decrypt_turnstile(
+            stored.smtp_password_ciphertext.as_ref().unwrap(),
+            &config.jwt.secret
+        )
+        .is_none()
+    );
+    update(
+        &db,
+        &config.jwt.secret,
+        turnstile_patch(2, serde_json::json!({"secret_key": "  private-value  "})),
+    )
+    .await
+    .unwrap();
+    let second = row(&db).await.unwrap().turnstile_secret_ciphertext;
+    assert_ne!(Some(cipher), second);
+    update(
+        &db,
+        &config.jwt.secret,
+        turnstile_patch(3, serde_json::json!({"secret_key": ""})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&db).await.unwrap().turnstile_secret_ciphertext, second);
+    update(
+        &db,
+        &config.jwt.secret,
+        turnstile_patch(4, serde_json::json!({"mode": "click"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&db).await.unwrap().turnstile_secret_ciphertext, second);
+    assert!(matches!(
+        update(
+            &db,
+            &config.jwt.secret,
+            turnstile_patch(4, serde_json::json!({"mode":"invisible"}))
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn turnstile_jwt_rotation_keeps_protection_and_allows_repair() {
+    let db = database().await;
+    let mut config = bootstrap();
+    initialize(&db, &config).await.unwrap();
+    update(
+        &db,
+        &config.jwt.secret,
+        turnstile_patch(1, enabled_turnstile()),
+    )
+    .await
+    .unwrap();
+    let cipher = row(&db).await.unwrap().turnstile_secret_ciphertext;
+    config.jwt.secret = "rotated-jwt-secret".into();
+    let snapshot = initialize(&db, &config).await.unwrap();
+    assert!(snapshot.comment.captcha.turnstile.enabled);
+    assert!(snapshot.turnstile_secret_needs_reset);
+    assert!(snapshot.comment.captcha.turnstile.secret_key.is_empty());
+    let response = serde_json::to_value(response(&config, &snapshot)).unwrap();
+    assert_eq!(
+        response["comment"]["captcha"]["turnstile"]["secret_configured"],
+        true
+    );
+    assert_eq!(
+        response["comment"]["captcha"]["turnstile"]["secret_needs_reset"],
+        true
+    );
+    let patch =
+        serde_json::from_value(serde_json::json!({"revision":2,"comment":{"moderation":true}}))
+            .unwrap();
+    assert!(
+        update(&db, &config.jwt.secret, patch)
+            .await
+            .unwrap()
+            .turnstile_secret_needs_reset
+    );
+    update(
+        &db,
+        &config.jwt.secret,
+        turnstile_patch(3, serde_json::json!({"secret_key":"", "mode":"click"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&db).await.unwrap().turnstile_secret_ciphertext, cipher);
+    let fixed = update(
+        &db,
+        &config.jwt.secret,
+        turnstile_patch(4, serde_json::json!({"secret_key":"replacement"})),
+    )
+    .await
+    .unwrap();
+    assert!(!fixed.turnstile_secret_needs_reset);
+    assert!(fixed.comment.captcha.turnstile.enabled);
+    assert_eq!(
+        load(&db, &config.jwt.secret)
+            .await
+            .unwrap()
+            .comment
+            .captcha
+            .turnstile
+            .secret_key,
+        "replacement"
+    );
+}
+
+#[tokio::test]
+async fn turnstile_invalid_settings_are_rejected_atomically() {
+    let db = database().await;
+    let config = bootstrap();
+    initialize(&db, &config).await.unwrap();
+    for value in [
+        serde_json::json!({"enabled":true}),
+        serde_json::json!({"mode":"automatic"}),
+        serde_json::json!({"site_key":"bad key"}),
+        serde_json::json!({"site_key":"x".repeat(256)}),
+        serde_json::json!({"secret_key":"x".repeat(4097)}),
+        serde_json::json!({"hostnames":vec!["example.com";101]}),
+    ] {
+        assert!(matches!(
+            update(&db, &config.jwt.secret, turnstile_patch(1, value)).await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+    for hostname in [
+        "",
+        "https://example.com",
+        "example.com:443",
+        "example.com/path",
+        "*.example.com",
+        "bad host",
+        "-bad.com",
+        "bad..com",
+        &"x".repeat(254),
+    ] {
+        assert!(
+            matches!(
+                update(
+                    &db,
+                    &config.jwt.secret,
+                    turnstile_patch(1, serde_json::json!({"hostnames":[hostname]}))
+                )
+                .await,
+                Err(AppError::BadRequest(_))
+            ),
+            "{hostname}"
+        );
+    }
+    assert_eq!(row(&db).await.unwrap().revision, 1);
+    assert!(
+        row(&db)
+            .await
+            .unwrap()
+            .turnstile_secret_ciphertext
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn turnstile_upgrade_from_six_migrations_preserves_existing_settings() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(&db, Some(6)).await.unwrap();
+    let legacy = r#"{"comment":{"moderation":true},"mail":{"site_name":"legacy"}}"#;
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+        "INSERT INTO app_settings (id,schema_version,revision,content,smtp_password_ciphertext,created_at,updated_at) VALUES (1,1,7,?,NULL,'2026-10-01 00:00:00','2026-10-01 00:00:00')", [legacy.into()])).await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
+    let mut config = bootstrap();
+    config.comment.captcha.turnstile.enabled = true;
+    let snapshot = initialize(&db, &config).await.unwrap();
+    assert_eq!(snapshot.revision, 7);
+    assert!(snapshot.comment.moderation);
+    assert_eq!(snapshot.mail.site_name, "legacy");
+    assert!(!snapshot.comment.captcha.turnstile.enabled);
+    assert_eq!(snapshot.comment.captcha.turnstile.mode, "managed");
+    assert_eq!(row(&db).await.unwrap().content, legacy);
+    assert!(
+        row(&db)
+            .await
+            .unwrap()
+            .turnstile_secret_ciphertext
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn turnstile_bootstrap_seeds_once_and_normalizes_hostnames() {
+    let db = database().await;
+    let mut config = bootstrap();
+    config.comment.captcha.turnstile = serde_json::from_value(enabled_turnstile()).unwrap();
+    let first = initialize(&db, &config).await.unwrap();
+    assert!(first.comment.captcha.turnstile.enabled);
+    assert_eq!(
+        first.comment.captcha.turnstile.hostnames,
+        ["comments.example.com"]
+    );
+    config.comment.captcha.turnstile.secret_key = "ignored".into();
+    assert_eq!(
+        initialize(&db, &config)
+            .await
+            .unwrap()
+            .comment
+            .captcha
+            .turnstile
+            .secret_key,
+        "  private-value  "
+    );
+}
+
 #[test]
 fn seed_insert_sql_preserves_mysql_and_other_backend_conflict_semantics() {
     use sea_orm::QueryTrait;

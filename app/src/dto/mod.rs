@@ -7,7 +7,7 @@ pub use mail::{MailStatusResponse, MailTestRequest};
 mod settings;
 pub use settings::{
     CaptchaSettingsPatch, CaptchaSettingsResponse, CommentSettingsPatch, MailSettingsPatch,
-    MailSettingsResponse, SettingsPatchRequest,
+    MailSettingsResponse, SettingsPatchRequest, TurnstileSettingsPatch, TurnstileSettingsResponse,
 };
 
 pub use auth::{ChangePasswordRequest, LoginRequest, LoginResponse};

@@ -7,17 +7,25 @@ use sha2::Sha256;
 
 use crate::error::AppError;
 
-fn cipher(jwt_secret: &str) -> Aes256Gcm {
+fn cipher(jwt_secret: &str, label: &[u8]) -> Aes256Gcm {
     let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(jwt_secret.as_bytes())
         .expect("HMAC accepts any key length");
-    hmac.update(b"rustaline-settings-v1");
+    hmac.update(label);
     Aes256Gcm::new(&hmac.finalize().into_bytes())
 }
 
 pub(super) fn encrypt(password: &str, jwt_secret: &str) -> Result<String, AppError> {
+    encrypt_with_label(password, jwt_secret, b"rustaline-settings-v1")
+}
+
+pub(super) fn encrypt_turnstile(secret: &str, jwt_secret: &str) -> Result<String, AppError> {
+    encrypt_with_label(secret, jwt_secret, b"rustaline-turnstile-secret-v1")
+}
+
+fn encrypt_with_label(password: &str, jwt_secret: &str, label: &[u8]) -> Result<String, AppError> {
     let mut nonce = [0; 12];
     OsRng.fill_bytes(&mut nonce);
-    let encrypted = cipher(jwt_secret)
+    let encrypted = cipher(jwt_secret, label)
         .encrypt(Nonce::from_slice(&nonce), password.as_bytes())
         .map_err(|_| AppError::internal_msg("settings password encryption failed"))?;
     let mut encoded = nonce.to_vec();
@@ -26,11 +34,19 @@ pub(super) fn encrypt(password: &str, jwt_secret: &str) -> Result<String, AppErr
 }
 
 pub(super) fn decrypt(encoded: &str, jwt_secret: &str) -> Option<String> {
+    decrypt_with_label(encoded, jwt_secret, b"rustaline-settings-v1")
+}
+
+pub(super) fn decrypt_turnstile(encoded: &str, jwt_secret: &str) -> Option<String> {
+    decrypt_with_label(encoded, jwt_secret, b"rustaline-turnstile-secret-v1")
+}
+
+fn decrypt_with_label(encoded: &str, jwt_secret: &str, label: &[u8]) -> Option<String> {
     let bytes = STANDARD.decode(encoded.strip_prefix("v1:")?).ok()?;
     if bytes.len() < 28 {
         return None;
     }
-    let plaintext = cipher(jwt_secret)
+    let plaintext = cipher(jwt_secret, label)
         .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
         .ok()?;
     String::from_utf8(plaintext).ok()

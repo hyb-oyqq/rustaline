@@ -482,6 +482,7 @@ mod tests {
 
     fn test_config() -> CaptchaConfig {
         CaptchaConfig {
+            turnstile: Default::default(),
             pow_enabled: true,
             pow_difficulty: 4,
             pow_ttl_secs: 600,

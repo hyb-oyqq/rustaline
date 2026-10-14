@@ -60,6 +60,8 @@ use crate::{dto, handlers};
         dto::SettingsPatchRequest,
         dto::CommentSettingsPatch,
         dto::CaptchaSettingsPatch,
+        dto::TurnstileSettingsPatch,
+        dto::TurnstileSettingsResponse,
         dto::MailSettingsPatch,
         dto::CaptchaSettingsResponse,
         dto::MailSettingsResponse,

@@ -319,6 +319,46 @@ async fn admin_settings_auth_revision_and_nested_updates() {
 }
 
 #[tokio::test]
+async fn turnstile_settings_default_and_modes_are_redacted() {
+    let app = build_app(None, false).await;
+    let token = login(&app).await;
+    let (status, body) = call(
+        &app,
+        json_request("GET", "/api/v1/admin/config", None, Some(&token)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let defaults = &body["comment"]["captcha"]["turnstile"];
+    assert_eq!(defaults["enabled"], false);
+    assert_eq!(defaults["mode"], "managed");
+    assert_eq!(defaults["secret_configured"], false);
+    for (index, mode) in ["invisible", "managed", "click"].into_iter().enumerate() {
+        let (status, body) = call(&app, json_request("PATCH", "/api/v1/admin/config", Some(json!({
+            "revision": index + 1, "comment": {"captcha": {"turnstile": {
+                "enabled": true, "mode": mode, "site_key": "site-key",
+                "secret_key": "private-value", "hostnames": [" Comments.Example.com ", "comments.example.com"]
+            }}}
+        })), Some(&token))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let turnstile = &body["comment"]["captcha"]["turnstile"];
+        assert_eq!(turnstile["mode"], mode);
+        assert_eq!(turnstile["hostnames"], json!(["comments.example.com"]));
+        assert_eq!(turnstile["secret_configured"], true);
+        assert_eq!(turnstile["secret_needs_reset"], false);
+        assert!(turnstile.get("secret_key").is_none());
+        assert!(!body.to_string().contains("private-value"));
+    }
+    let (status, public) = call(
+        &app,
+        json_request("GET", "/api/v1/captcha/config", None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!public.to_string().contains("private-value"));
+    assert!(!public.to_string().contains("secret_key"));
+}
+
+#[tokio::test]
 async fn admin_settings_mail_password_updates_are_secret() {
     let app = build_app(None, false).await;
     let token = login(&app).await;

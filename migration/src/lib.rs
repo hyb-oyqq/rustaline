@@ -6,6 +6,7 @@ mod m20260816_000001_drop_user;
 mod m20260903_000001_create_admin;
 mod m20261013_000001_create_app_settings;
 mod m20261013_000002_create_mail_jobs;
+mod m20261014_000001_add_turnstile_secret;
 
 pub struct Migrator;
 
@@ -18,6 +19,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260903_000001_create_admin::Migration),
             Box::new(m20261013_000001_create_app_settings::Migration),
             Box::new(m20261013_000002_create_mail_jobs::Migration),
+            Box::new(m20261014_000001_add_turnstile_secret::Migration),
         ]
     }
 }

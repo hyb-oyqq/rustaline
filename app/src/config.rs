@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::config::mail_config::MailConfig;
 mod mail_config;
+mod turnstile_config;
+pub use turnstile_config::TurnstileConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +134,8 @@ pub struct CommentConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptchaConfig {
+    #[serde(default)]
+    pub turnstile: TurnstileConfig,
     /// 是否启用基于 SHA-256 hashcash 的工作量证明
     #[serde(default = "default_true")]
     pub pow_enabled: bool,
@@ -174,6 +178,7 @@ fn default_image_max_attempts() -> u32 {
 impl Default for CaptchaConfig {
     fn default() -> Self {
         Self {
+            turnstile: TurnstileConfig::default(),
             // 默认两种验证码都开启（防滥用优先）；需要旧行为时用
             // APP_COMMENT_POW_ENABLED=false / APP_COMMENT_CAPTCHA_IMAGE_ENABLED=false 关闭
             pow_enabled: true,
@@ -309,6 +314,26 @@ const FLAT_ENV_MAP: &[(&str, &str)] = &[
     ),
     ("APP_COMMENT_CAPTCHA_BIND_IP", "comment.captcha.bind_ip"),
     ("APP_COMMENT_CAPTCHA_SECRET", "comment.captcha.secret"),
+    (
+        "APP_COMMENT_TURNSTILE_ENABLED",
+        "comment.captcha.turnstile.enabled",
+    ),
+    (
+        "APP_COMMENT_TURNSTILE_MODE",
+        "comment.captcha.turnstile.mode",
+    ),
+    (
+        "APP_COMMENT_TURNSTILE_SITE_KEY",
+        "comment.captcha.turnstile.site_key",
+    ),
+    (
+        "APP_COMMENT_TURNSTILE_SECRET_KEY",
+        "comment.captcha.turnstile.secret_key",
+    ),
+    (
+        "APP_COMMENT_TURNSTILE_HOSTNAMES",
+        "comment.captcha.turnstile.hostnames",
+    ),
     ("APP_INITIAL_ADMIN_USERNAME", "initial_admin.username"),
     ("APP_INITIAL_ADMIN_PASSWORD", "initial_admin.password"),
     ("APP_MAIL_ENABLED", "mail.enabled"),
@@ -330,6 +355,16 @@ const FLAT_ENV_MAP: &[(&str, &str)] = &[
 /// 解析环境变量原始字符串：优先按 i64 / bool 解析，保证数值 / 布尔字段能反序列化，
 /// 其余按原样字符串处理。
 fn parse_env_value(key: &str, raw: &str) -> config::Value {
+    if key == "comment.captcha.turnstile.hostnames" {
+        return raw
+            .split(',')
+            .map(config::Value::from)
+            .collect::<Vec<_>>()
+            .into();
+    }
+    if key.starts_with("comment.captcha.turnstile.") && key != "comment.captcha.turnstile.enabled" {
+        return raw.into();
+    }
     // 密码、用户名、站点名等字符串必须保留前导零与空白，不能先转数值。
     if key.starts_with("mail.")
         && !matches!(
@@ -397,6 +432,49 @@ impl AppConfig {
 mod tests {
     use super::{AppConfig, nested_env_overrides, validate_jwt_secret};
     use config::{Config, File, FileFormat};
+
+    #[test]
+    fn turnstile_environment_import_preserves_keys_and_splits_hostnames() {
+        let mut builder = Config::builder().add_source(File::from_str(
+            include_str!("../../config/default.toml"),
+            FileFormat::Toml,
+        ));
+        for (name, value) in [
+            ("APP_COMMENT_TURNSTILE_ENABLED", "true"),
+            ("APP_COMMENT_TURNSTILE_MODE", "click"),
+            ("APP_COMMENT_TURNSTILE_SITE_KEY", "000123"),
+            ("APP_COMMENT_TURNSTILE_SECRET_KEY", "00123456"),
+            (
+                "APP_COMMENT_TURNSTILE_HOSTNAMES",
+                "Example.com, comments.example.com",
+            ),
+        ] {
+            let key = super::FLAT_ENV_MAP
+                .iter()
+                .find(|(env, _)| *env == name)
+                .unwrap()
+                .1;
+            builder = builder
+                .set_override(key, super::parse_env_value(key, value))
+                .unwrap();
+        }
+        let cfg: AppConfig = builder.build().unwrap().try_deserialize().unwrap();
+        let turnstile = &cfg.comment.captcha.turnstile;
+        assert!(turnstile.enabled);
+        assert_eq!(turnstile.mode, "click");
+        assert_eq!(turnstile.site_key, "000123");
+        assert_eq!(turnstile.secret_key, "00123456");
+        assert_eq!(
+            turnstile.hostnames,
+            ["Example.com", " comments.example.com"]
+        );
+        assert!(
+            !serde_json::to_string(turnstile)
+                .unwrap()
+                .contains("secret_key")
+        );
+        assert!(!format!("{turnstile:?}").contains("00123456"));
+    }
 
     /// 嵌套环境变量写法（`APP_<段>__<键>`，README 文档承诺的格式）必须生效。
     #[test]
