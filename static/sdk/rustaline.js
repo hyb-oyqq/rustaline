@@ -1607,6 +1607,7 @@
 
   var turnstileModalLocks = 0;
   var turnstilePreviousOverflow = '';
+  var turnstileModalStack = [];
 
   Rustaline.prototype._buildTurnstileStatus = function () {
     var self = this;
@@ -1632,44 +1633,54 @@
       var settled = false, api = null, widgetId = null, overlay = null, executeBtn = null, started = false;
       var returnFocus = document.activeElement;
       var host = h('div', { class: 'rs-turnstile-widget' });
+      // The complete ancestor chain is connected before render. Turning the
+      // shell into a dialog never detaches the live challenge iframe.
+      var dialog = h('div', {}, host);
+      var shell = h('div', { class: 'rs-turnstile-session' }, dialog);
       var attempt = { statusNodes: [], cancel: function () { finish(null, true); } };
       self._turnstileAttempt = attempt;
-      document.body.appendChild(host);
+      document.body.appendChild(shell);
       var currentForm = self.el.querySelector('.rs-form');
       if (currentForm) currentForm.appendChild(self._buildTurnstileStatus());
       var timer = setTimeout(function () { finish(null, false); }, 120000);
 
       function finish(token, cancelled) {
         if (settled) return;
+        var wasTop = topModal();
         settled = true;
         clearTimeout(timer);
         document.removeEventListener('keydown', onKey, true);
         if (api && widgetId !== null) { try { api.remove(widgetId); } catch (_) {} }
         host.remove();
+        shell.remove();
         attempt.statusNodes.forEach(function (node) { node.remove(); });
         if (overlay) {
           overlay.remove();
+          var modalIndex = turnstileModalStack.indexOf(overlay);
+          if (modalIndex >= 0) turnstileModalStack.splice(modalIndex, 1);
           if (--turnstileModalLocks === 0) document.body.style.overflow = turnstilePreviousOverflow;
         }
         if (self._turnstileAttempt === attempt) self._turnstileAttempt = null;
-        if (overlay && !self._destroyed) {
-          var target = returnFocus && document.body.contains(returnFocus) ? returnFocus : self.el.querySelector('.rs-btn--primary');
+        if (wasTop) {
+          var remaining = turnstileModalStack[turnstileModalStack.length - 1];
+          var target = remaining
+            ? (remaining.contains(document.activeElement) ? null : remaining.querySelector('.rs-turnstile-cancel'))
+            : (self._destroyed ? null : (returnFocus && document.body.contains(returnFocus) ? returnFocus : self.el.querySelector('.rs-btn--primary')));
           if (target && target.focus) { try { target.focus(); } catch (_) {} }
         }
         if (token) resolve(token);
         else reject(Object.assign(new Error(cancelled ? lang.turnstileCancelled : lang.errTurnstile), { _kind: 'turnstile' }));
       }
       function topModal() {
-        var dialogs = document.querySelectorAll('.rs-turnstile-modal');
-        return overlay && dialogs[dialogs.length - 1] === overlay;
+        return overlay && turnstileModalStack[turnstileModalStack.length - 1] === overlay;
       }
       function onKey(e) {
         if (overlay && !topModal()) return;
         if (!overlay && document.querySelector('.rs-turnstile-modal')) return;
         if (!overlay && !self.el.contains(document.activeElement)) return;
-        if (e.key === 'Escape') { e.preventDefault(); finish(null, true); }
+        if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); finish(null, true); }
         if (e.key === 'Tab' && overlay) {
-          var buttons = overlay.querySelectorAll('button, a[href], iframe');
+          var buttons = Array.prototype.filter.call(overlay.querySelectorAll('button, a[href], iframe'), function (node) { return !node.disabled; });
           if (!buttons.length) return;
           var first = buttons[0], last = buttons[buttons.length - 1];
           if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
@@ -1678,8 +1689,15 @@
       }
       function showDialog() {
         if (settled || overlay) return;
-        overlay = h('div', { class: 'rs-captcha-overlay rs-turnstile-modal', role: 'dialog',
-          'aria-modal': 'true', 'aria-label': lang.turnstileTitle });
+        overlay = shell;
+        overlay.className = 'rs-captcha-overlay rs-turnstile-modal';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-label', lang.turnstileTitle);
+        turnstileModalStack.push(overlay);
+        // Shells stay in their original DOM locations; z-index follows the
+        // order dialogs became visible, independent of listener registration.
+        for (var modal = 0; modal < turnstileModalStack.length; modal++) turnstileModalStack[modal].style.zIndex = 10000 + modal;
         copyThemeTokens(self.el, overlay);
         var cancel = h('button', { type: 'button', class: 'rs-btn rs-btn--ghost rs-turnstile-cancel',
           text: lang.turnstileCancel, onclick: function () { finish(null, true); } });
@@ -1689,16 +1707,15 @@
             text: lang.turnstileStart, disabled: !api, onclick: execute });
           actions.appendChild(executeBtn);
         }
-        overlay.appendChild(h('div', { class: 'rs-captcha-dialog' },
-          h('h3', { class: 'rs-captcha-dialog__title', text: lang.turnstileTitle }),
-          h('p', { class: 'rs-captcha-dialog__hint', text: api ? lang.turnstileVerifying : lang.turnstileLoading }),
-          host,
-          h('a', { class: 'rs-captcha-dialog__hint', href: 'https://www.cloudflare.com/privacypolicy/',
-            target: '_blank', rel: 'noopener noreferrer', text: lang.turnstilePrivacy }), actions));
+        dialog.className = 'rs-captcha-dialog';
+        dialog.insertBefore(h('h3', { class: 'rs-captcha-dialog__title', text: lang.turnstileTitle }), host);
+        dialog.insertBefore(h('p', { class: 'rs-captcha-dialog__hint', text: api ? lang.turnstileVerifying : lang.turnstileLoading }), host);
+        dialog.appendChild(h('a', { class: 'rs-captcha-dialog__hint', href: 'https://www.cloudflare.com/privacypolicy/',
+          target: '_blank', rel: 'noopener noreferrer', text: lang.turnstilePrivacy }));
+        dialog.appendChild(actions);
         overlay.addEventListener('click', function (e) { if (e.target === overlay) finish(null, true); });
         if (turnstileModalLocks++ === 0) turnstilePreviousOverflow = document.body.style.overflow || '';
         document.body.style.overflow = 'hidden';
-        document.body.appendChild(overlay);
         (executeBtn && !executeBtn.disabled ? executeBtn : cancel).focus();
       }
       function execute() {
@@ -1843,15 +1860,18 @@
    */
   Rustaline.prototype._loadImageCaptcha = function () {
     var self = this;
+    if (this._destroyed) return Promise.resolve();
     this.captcha.captchaLoading = true;
     this.captcha.captchaError = false;
     this._render();
     return fetch(this._captchaBase('image'), { headers: { 'Accept': 'application/json' } })
       .then(function (res) {
+        if (self._destroyed) return null;
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       })
       .then(function (data) {
+        if (self._destroyed) return;
         self.captcha.captchaId = data.captcha_id || '';
         self.captcha.captchaImage = data.image || '';
         self.captcha.captchaLoading = false;
@@ -1860,6 +1880,7 @@
         self._notifyCaptchaImageChange();
       })
       .catch(function () {
+        if (self._destroyed) return;
         self.captcha.captchaLoading = false;
         self.captcha.captchaError = true;
         self.captcha.captchaId = '';
@@ -1871,6 +1892,7 @@
 
   /// 图形码状态变化通知（模态框打开期间由其同步图片区）
   Rustaline.prototype._notifyCaptchaImageChange = function () {
+    if (this._destroyed) return;
     if (this.captcha.onImageChange) {
       try { this.captcha.onImageChange(); } catch (_) { /* ignore */ }
     }
@@ -1893,6 +1915,7 @@
    */
   Rustaline.prototype._openCaptchaModal = function (returnFocusEl, errorText) {
     var self = this;
+    if (this._destroyed) return Promise.resolve(null);
     var lang = this.lang;
     if (this._captchaModal) return Promise.resolve(null);
 
@@ -1989,7 +2012,7 @@
       overlay.remove();
       self._captchaModal = null;
       self._closeCaptchaModal = null;
-      if (returnFocusEl && returnFocusEl.focus) { try { returnFocusEl.focus(); } catch (_) {} }
+      if (!self._destroyed && returnFocusEl && returnFocusEl.focus) { try { returnFocusEl.focus(); } catch (_) {} }
       if (resolveRef) resolveRef(result);
     }
     function confirm() {
@@ -2283,6 +2306,7 @@
   // ---- 渲染层 ----
 
   Rustaline.prototype._render = function () {
+    if (this._destroyed) return;
     var self = this;
     var root = this.el;
     root.innerHTML = ''; // 清空结构（仅清自身，不涉及用户数据）
@@ -2889,7 +2913,7 @@
     var clearedReply = this.state.replyTo === (replyTarget || null) || (this.state.replyTo == null && !replyTarget);
     var clearedDraft = clearedReply && this.draft.comment.trim() === ctx.comment;
     if (clearedDraft) this.draft.comment = '';
-    if (clearedReply) this.state.replyTo = null;
+    if (clearedDraft) this.state.replyTo = null;
 
     var optimisticInserted = false;
     function rollbackOptimistic() {

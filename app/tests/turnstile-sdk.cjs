@@ -13,13 +13,24 @@ class Element {
     this.style = {overflow: '', setProperty(name, value) { this[name] = value; }};
     this.classList = {remove: () => {}};
   }
-  appendChild(child) { child.remove(); this.children.push(child); child.parentNode = this; return child; }
+  appendChild(child) {
+    if (this.ownerDocument.body?.contains(child)) this.ownerDocument.connectedMoves = (this.ownerDocument.connectedMoves || 0) + 1;
+    child.remove(); this.children.push(child); child.parentNode = this; return child;
+  }
+  insertBefore(child, reference) { child.remove(); this.children.splice(this.children.indexOf(reference), 0, child); child.parentNode = this; return child; }
+  replaceWith(replacement) { if (this.parentNode) { this.parentNode.insertBefore(replacement, this); this.remove(); } }
+  get innerHTML() { return this._html || ''; }
+  set innerHTML(value) { this._html = value; for (const child of this.children) child.parentNode = null; this.children = []; }
   remove() { if (this.parentNode) { const children = this.parentNode.children; children.splice(children.indexOf(this), 1); this.parentNode = null; } }
   setAttribute(name, value) { this.attributes[name] = String(value); if (name === 'disabled') this.disabled = true; }
   removeAttribute(name) { delete this.attributes[name]; }
   addEventListener(name, fn) { if (!this.listeners.has(name)) this.listeners.set(name, new Set()); this.listeners.get(name).add(fn); }
   removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
-  dispatch(name, event = {}) { for (const fn of this.listeners.get(name) || []) fn({...event, target: event.target || this, preventDefault() {}, stopPropagation() {}}); }
+  dispatch(name, event = {}) {
+    let stopped = false;
+    const delivered = {...event, target: event.target || this, preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() { stopped = true; }};
+    for (const fn of this.listeners.get(name) || []) { fn(delivered); if (stopped) break; }
+  }
   focus() { this.ownerDocument.activeElement = this; }
   contains(el) { return el === this || this.children.some(child => child.contains(el)); }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
@@ -270,6 +281,64 @@ async function run() {
   sdk._handleSubmit(form); await flush(); assert.equal(b.events[0], 'pow', 'PoW 完成之后才加载 Turnstile');
   b.load(); await flush(); b.widgets[0].options.callback('ordered'); await flush();
   assert.deepEqual(b.events, ['pow', 'render', 'execute', 'post']); assert.ok(b.posts[0].pow);
+  b = browser(); ({sdk, form} = b.instance()); sdk._handleSubmit(form); await flush(); b.load(); await flush();
+  const interactive = b.widgets[0];
+  const renderedParent = interactive.container.parentNode;
+  const iframe = interactive.container.appendChild(b.document.createElement('iframe'));
+  const connectedMoves = b.document.connectedMoves || 0;
+  interactive.options['before-interactive-callback']();
+  assert.equal(b.document.connectedMoves || 0, connectedMoves, '显示交互框不得断开并重新挂载任何已连接节点');
+  assert.ok(interactive.container.parentNode === renderedParent, '显示交互框不能重新挂载已 render 的 iframe 宿主');
+  assert.equal(iframe.parentNode, interactive.container);
+  assert.ok(b.document.body.contains(iframe));
+  interactive.options['error-callback'](); await flush();
+  b = browser(); ({sdk, form} = b.instance());
+  const sameParent = {id: 'same-parent'}; sdk.state.replyTo = sameParent;
+  sdk._handleSubmit(form); await flush(); b.load(); await flush();
+  sdk.draft.comment = '发给同一人的下一条回复';
+  b.widgets[0].options.callback('first-reply'); await flush();
+  assert.equal(sdk.draft.comment, '发给同一人的下一条回复');
+  assert.ok(sdk.state.replyTo === sameParent, '新正文与同一回复目标必须成对保留');
+  b = browser(); ({sdk, form} = b.instance()); const later = b.instance();
+  sdk._handleSubmit(form); later.sdk._handleSubmit(later.form); await flush(); b.load(); await flush();
+  b.widgets[1].options['before-interactive-callback']();
+  b.widgets[0].options['before-interactive-callback']();
+  b.document.dispatch('keydown', {key: 'Escape'}); await flush();
+  assert.ok(sdk._turnstileAttempt === null, '倒序出现的弹框以最后显示的实例为顶层');
+  assert.ok(later.sdk._turnstileAttempt, '一次 Escape 不能继续取消刚成为顶层的第二个实例');
+  assert.equal(b.removed.length, 1); assert.equal(b.document.body.style.overflow, 'hidden');
+  assert.ok(b.document.querySelector('.rs-turnstile-modal').contains(b.document.activeElement), '关闭顶层后焦点留在剩下的弹框');
+  b.document.dispatch('keydown', {key: 'Escape'}); await flush();
+  assert.equal(b.removed.length, 2); assert.equal(b.document.body.style.overflow, '');
+
+  b = browser(); ({sdk, form} = b.instance()); const focused = b.instance();
+  sdk._handleSubmit(form); focused.sdk._handleSubmit(focused.form); await flush(); b.load(); await flush();
+  b.widgets[0].options['before-interactive-callback'](); b.widgets[1].options['before-interactive-callback']();
+  const topFocus = b.document.activeElement;
+  b.widgets[0].options['error-callback'](); await flush();
+  assert.ok(b.document.activeElement === topFocus, '下层弹窗异步失败不能抢顶层焦点');
+  b.widgets[1].options['error-callback'](); await flush();
+  for (const lateResult of ['success', 'body-error', 'fetch-error']) {
+    b = browser(); ({sdk, form} = b.instance()); b.configure({image: {enabled: true}});
+    const originalFetch = b.context.fetch;
+    let releaseImage, rejectImage;
+    const delayedImage = new Promise((resolve, reject) => { releaseImage = resolve; rejectImage = reject; });
+    b.context.fetch = (url, options) => url.endsWith('/image')
+      ? (lateResult === 'fetch-error' ? delayedImage : Promise.resolve({ok: true, json: () => delayedImage}))
+      : originalFetch(url, options);
+    // Use the real modal, image loading and renderer here: a late render would
+    // visibly rebuild the destroyed mounting point, rather than hit a spy.
+    sdk._render = b.context.Rustaline.prototype._render;
+    sdk._handleSubmit(form); await flush(); assert.ok(sdk._captchaModal);
+    sdk.destroy(); assert.equal(sdk.el.children.length, 0);
+    if (lateResult === 'success') releaseImage({captcha_id: 'late-image', image: 'late-png'});
+    else rejectImage(Error('late image failure'));
+    await flush();
+    assert.equal(sdk.el.children.length, 0, lateResult + ' 图片响应不能复活销毁的根节点');
+    assert.equal(b.posts.length, 0); assert.equal(b.document.querySelector('.rs-captcha-overlay'), null);
+    assert.equal(sdk.captcha.captchaId, '', '销毁后不接收新的图片凭据');
+    sdk._render(); assert.equal(sdk.el.children.length, 0, '销毁后的显式重绘也保持空根节点');
+  }
   console.log('Turnstile SDK 三模式、提交门控、脚本重试、多实例、生命周期、草稿与回复保护回归通过');
 }
 
