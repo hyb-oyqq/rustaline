@@ -1614,7 +1614,7 @@
     var attempt = this._turnstileAttempt;
     var status = h('div', { class: 'rs-turnstile-status' },
       h('span', { role: 'status', text: this.lang.turnstileVerifying }),
-      h('a', { href: 'https://www.cloudflare.com/privacypolicy/', target: '_blank',
+      h('a', { href: 'https://www.cloudflare.com/turnstile-privacy-policy/', target: '_blank',
         rel: 'noopener noreferrer', text: this.lang.turnstilePrivacy }),
       h('button', { type: 'button', class: 'rs-btn rs-btn--ghost rs-turnstile-cancel',
         text: this.lang.turnstileCancel, onclick: function () {
@@ -1631,6 +1631,7 @@
     if (this._destroyed || this._turnstileAttempt) return Promise.reject(new Error(lang.errTurnstile));
     return new Promise(function (resolve, reject) {
       var settled = false, api = null, widgetId = null, overlay = null, executeBtn = null, started = false;
+      var dialogHint = null;
       var returnFocus = document.activeElement;
       var host = h('div', { class: 'rs-turnstile-widget' });
       // The complete ancestor chain is connected before render. Turning the
@@ -1650,12 +1651,16 @@
         settled = true;
         clearTimeout(timer);
         document.removeEventListener('keydown', onKey, true);
-        if (api && widgetId !== null) { try { api.remove(widgetId); } catch (_) {} }
-        host.remove();
-        shell.remove();
+        // Official callbacks may still perform internal reset bookkeeping
+        // after returning. Settle immediately, then remove the connected
+        // widget only once the current callback stack has fully unwound.
+        setTimeout(function () {
+          if (api && widgetId !== null) { try { api.remove(widgetId); } catch (_) {} }
+          host.remove();
+          shell.remove();
+        }, 0);
         attempt.statusNodes.forEach(function (node) { node.remove(); });
         if (overlay) {
-          overlay.remove();
           var modalIndex = turnstileModalStack.indexOf(overlay);
           if (modalIndex >= 0) turnstileModalStack.splice(modalIndex, 1);
           if (--turnstileModalLocks === 0) document.body.style.overflow = turnstilePreviousOverflow;
@@ -1709,8 +1714,9 @@
         }
         dialog.className = 'rs-captcha-dialog';
         dialog.insertBefore(h('h3', { class: 'rs-captcha-dialog__title', text: lang.turnstileTitle }), host);
-        dialog.insertBefore(h('p', { class: 'rs-captcha-dialog__hint', text: api ? lang.turnstileVerifying : lang.turnstileLoading }), host);
-        dialog.appendChild(h('a', { class: 'rs-captcha-dialog__hint', href: 'https://www.cloudflare.com/privacypolicy/',
+        dialogHint = h('p', { class: 'rs-captcha-dialog__hint', text: api ? lang.turnstileVerifying : lang.turnstileLoading });
+        dialog.insertBefore(dialogHint, host);
+        dialog.appendChild(h('a', { class: 'rs-captcha-dialog__hint', href: 'https://www.cloudflare.com/turnstile-privacy-policy/',
           target: '_blank', rel: 'noopener noreferrer', text: lang.turnstilePrivacy }));
         dialog.appendChild(actions);
         overlay.addEventListener('click', function (e) { if (e.target === overlay) finish(null, true); });
@@ -1721,6 +1727,7 @@
       function execute() {
         if (settled || started || !api || widgetId === null) return;
         started = true;
+        if (dialogHint) dialogHint.textContent = lang.turnstileVerifying;
         if (executeBtn) executeBtn.disabled = true;
         try { api.execute(widgetId); } catch (_) { finish(null, false); }
       }
@@ -1729,16 +1736,17 @@
       loadTurnstileScript().then(function (loaded) {
         if (settled || self._destroyed) return;
         api = loaded;
+        if (dialogHint) dialogHint.textContent = lang.turnstileVerifying;
         try {
           widgetId = api.render(host, {
             sitekey: config.site_key, action: 'comment', execution: 'execute',
             appearance: config.mode === 'managed' ? 'interaction-only' : 'always',
-            'response-field': false, retry: 'never', 'refresh-expired': 'manual',
+            'response-field': false, retry: 'never', 'refresh-expired': config.mode === 'invisible' ? 'never' : 'manual',
             callback: function (token) {
               if (!started || typeof token !== 'string' || !token.trim() || token.length > 2048) finish(null, false);
               else finish(token, false);
             },
-            'error-callback': function () { finish(null, false); },
+            'error-callback': function () { finish(null, false); return true; },
             'expired-callback': function () { finish(null, false); },
             'timeout-callback': function () { finish(null, false); },
             'before-interactive-callback': function () {
@@ -1748,7 +1756,7 @@
               else showDialog();
             }
           });
-          if (settled) { try { api.remove(widgetId); } catch (_) {} return; }
+          if (settled) return;
           if (executeBtn) { executeBtn.disabled = false; executeBtn.focus(); }
           if (config.mode !== 'click') execute();
         } catch (_) { finish(null, false); }

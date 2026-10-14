@@ -41,6 +41,7 @@ class Element {
   }
 }
 
+let activeBrowser;
 function browser() {
   const document = new Element('document', null); document.ownerDocument = document;
   document.createElement = tag => new Element(tag, document);
@@ -84,14 +85,14 @@ function browser() {
     sdk._showFormError = (_form, text) => { sdk.error = text; };
     return {sdk, form, button};
   }
-  return {context, document, instance, posts, events, widgets, executed, removed, timers, api,
+  return activeBrowser = {context, document, instance, posts, events, widgets, executed, removed, timers, api,
     configure: value => { config = {...config, ...value}; },
     response: fn => { postResponse = fn; },
     load() { context.turnstile = api; const script = document.head.children.find(el => el.tagName === 'SCRIPT'); if (script) { if (script.onload) script.onload(); script.dispatch('load'); } },
     advance(ms) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); } }
   };
 }
-const flush = async () => { for (let i = 0; i < 35; i++) await Promise.resolve(); };
+const flush = async () => { for (let i = 0; i < 35; i++) { await Promise.resolve(); activeBrowser?.advance(0); } };
 
 async function run() {
   let b = browser(); let {sdk, form} = b.instance();
@@ -121,7 +122,7 @@ async function run() {
     assert.equal(widget.options.execution, 'execute');
     assert.equal(widget.options.appearance, mode === 'managed' ? 'interaction-only' : 'always');
     assert.equal(widget.options.retry, 'never');
-    assert.equal(widget.options['refresh-expired'], 'manual');
+    assert.equal(widget.options['refresh-expired'], mode === 'invisible' ? 'never' : 'manual', 'Invisible 不支持 manual，必须禁用自动刷新');
     assert.equal(widget.options['response-field'], false);
     assert.ok(b.document.body.contains(widget.container), '组件挂 body，表单重绘不丢失');
     if (mode === 'click') {
@@ -339,6 +340,28 @@ async function run() {
     assert.equal(sdk.captcha.captchaId, '', '销毁后不接收新的图片凭据');
     sdk._render(); assert.equal(sdk.el.children.length, 0, '销毁后的显式重绘也保持空根节点');
   }
+  b = browser(); ({sdk, form} = b.instance()); sdk._handleSubmit(form); await flush(); b.load(); await flush();
+  const externalError = b.widgets[0];
+  externalError.options['error-callback']();
+  assert.equal(b.removed.length, 0, '官方回调仍在栈内时不能同步 remove widget');
+  assert.ok(b.document.body.contains(externalError.container), '回调栈内仍保留官方容器供内部收尾');
+  externalError.options.callback('late-in-same-stack');
+  await flush();
+  assert.equal(b.removed.length, 1, '下一事件轮清理 widget'); assert.equal(b.posts.length, 0);
+  assert.equal(b.document.querySelector('.rs-turnstile-session'), null);
+  b = browser(); b.configure({turnstile: {enabled: true, mode: 'click', site_key: 'public-test-key'}});
+  ({sdk, form} = b.instance()); sdk._handleSubmit(form); await flush();
+  const loadingHint = b.document.querySelector('.rs-turnstile-modal').querySelectorAll('.rs-captcha-dialog__hint').find(el => el.tagName === 'P');
+  assert.equal(loadingHint.textContent, sdk.lang.turnstileLoading);
+  b.load(); await flush();
+  assert.equal(loadingHint.textContent, sdk.lang.turnstileVerifying, '脚本就绪后不能继续提示加载中');
+  b.document.querySelector('.rs-turnstile-start').dispatch('click');
+  assert.equal(loadingHint.textContent, sdk.lang.turnstileVerifying, '启动验证后显示正在验证');
+  const links = [...b.document.querySelector('.rs-turnstile-modal').querySelectorAll('button, a[href], iframe'), ...b.document.querySelector('.rs-turnstile-status').querySelectorAll('button, a[href], iframe')].filter(el => el.tagName === 'A');
+  assert.equal(links.length, 2);
+  for (const link of links) assert.equal(link.attributes.href, 'https://www.cloudflare.com/turnstile-privacy-policy/');
+  assert.equal(b.widgets[0].options['error-callback'](), true, '明确告知官方错误回调已处理，避免额外异常报告');
+  await flush();
   console.log('Turnstile SDK 三模式、提交门控、脚本重试、多实例、生命周期、草稿与回复保护回归通过');
 }
 
