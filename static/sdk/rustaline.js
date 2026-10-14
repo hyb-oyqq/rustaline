@@ -94,6 +94,14 @@
       configRefreshFailed: '无法刷新评论设置，草稿已保留，请重试',
       errPow: '安全校验失败，请重试',
       errCaptcha: '图形验证码错误或已过期，请重新输入',
+      turnstileTitle: '安全验证',
+      turnstileLoading: '正在加载安全验证…',
+      turnstileVerifying: '正在进行安全验证…',
+      turnstileStart: '点击验证',
+      turnstileCancel: '取消验证',
+      turnstileCancelled: '验证已取消，草稿已保留',
+      turnstilePrivacy: '验证由 Cloudflare 提供，查看隐私政策',
+      errTurnstile: '安全验证失败或已过期，草稿已保留，请重试',
       timeJustNow: '刚刚',
       timeMinutesAgo: function (n) { return n + ' 分钟前'; },
       timeHoursAgo: function (n) { return n + ' 小时前'; },
@@ -150,6 +158,14 @@
       configRefreshFailed: 'Unable to refresh comment settings. Your draft is saved; please retry.',
       errPow: 'Security check failed, please try again',
       errCaptcha: 'Captcha is incorrect or expired, please try again',
+      turnstileTitle: 'Security verification',
+      turnstileLoading: 'Loading security verification…',
+      turnstileVerifying: 'Verifying…',
+      turnstileStart: 'Click to verify',
+      turnstileCancel: 'Cancel verification',
+      turnstileCancelled: 'Verification cancelled. Your draft is saved.',
+      turnstilePrivacy: 'Verification by Cloudflare. Read the privacy policy.',
+      errTurnstile: 'Verification failed or expired. Your draft is saved; please retry.',
       timeJustNow: 'just now',
       timeMinutesAgo: function (n) { return n === 1 ? '1 minute ago' : n + ' minutes ago'; },
       timeHoursAgo: function (n) { return n === 1 ? '1 hour ago' : n + ' hours ago'; },
@@ -629,6 +645,10 @@
   margin-top: 14px;
 }
 .rs-captcha-dialog__actions .rs-btn { height: 36px; padding: 0 16px; font-size: 13px; }
+.rs-turnstile-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; color: var(--rs-on-surface-variant); font-size: 13px; }
+.rs-turnstile-modal .rs-captcha-dialog { box-sizing: border-box; width: 350px; padding: 20px; }
+.rs-turnstile-widget { max-width: 100%; }
+.rs-turnstile-modal .rs-turnstile-widget { margin: 12px 0; }
 
 /* ---- 评论列表 ---- */
 .rs-list { list-style: none; margin: 0; padding: 0; }
@@ -1502,6 +1522,7 @@
     this.captcha = {
       pow: { enabled: false, difficulty: 4 },
       image: { enabled: false },
+      turnstile: { enabled: false, mode: 'managed', site_key: '' },
       loaded: false,
       configOk: false,
       supported: false,
@@ -1543,6 +1564,181 @@
 
   // ---- 验证码 ----
 
+  // A page shares script loading, while cancellation and widgets belong to an
+  // individual instance. Cancelling one instance must not abort another's load.
+  var turnstileScriptPromise = null;
+  function loadTurnstileScript() {
+    if (global.turnstile && typeof global.turnstile.render === 'function') return Promise.resolve(global.turnstile);
+    if (turnstileScriptPromise) return turnstileScriptPromise;
+    var script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    var promise = new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () { finish(new Error('Turnstile script timeout')); }, 10000);
+      function finish(error) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        script.onload = script.onerror = null;
+        if (error) { script.remove(); reject(error); }
+        else resolve(global.turnstile);
+      }
+      script.onload = function () {
+        finish(global.turnstile && typeof global.turnstile.render === 'function' ? null : new Error('Turnstile unavailable'));
+      };
+      script.onerror = function () { finish(new Error('Turnstile script blocked')); };
+      document.head.appendChild(script);
+    });
+    turnstileScriptPromise = promise;
+    promise.catch(function () { if (turnstileScriptPromise === promise) turnstileScriptPromise = null; });
+    return promise;
+  }
+
+  function copyThemeTokens(source, target) {
+    try {
+      var cs = global.getComputedStyle(source);
+      for (var i = 0; i < cs.length; i++) {
+        var name = cs[i];
+        if (name.indexOf('--rs-') === 0) target.style.setProperty(name, cs.getPropertyValue(name));
+      }
+    } catch (_) { /* CSS defaults cover unavailable computed styles. */ }
+  }
+
+  var turnstileModalLocks = 0;
+  var turnstilePreviousOverflow = '';
+
+  Rustaline.prototype._buildTurnstileStatus = function () {
+    var self = this;
+    var attempt = this._turnstileAttempt;
+    var status = h('div', { class: 'rs-turnstile-status' },
+      h('span', { role: 'status', text: this.lang.turnstileVerifying }),
+      h('a', { href: 'https://www.cloudflare.com/privacypolicy/', target: '_blank',
+        rel: 'noopener noreferrer', text: this.lang.turnstilePrivacy }),
+      h('button', { type: 'button', class: 'rs-btn rs-btn--ghost rs-turnstile-cancel',
+        text: this.lang.turnstileCancel, onclick: function () {
+          if (self._turnstileAttempt === attempt) attempt.cancel();
+        } }));
+    attempt.statusNodes.push(status);
+    return status;
+  };
+
+  /** Fresh, single-use token; all exits remove this instance's widget and UI. */
+  Rustaline.prototype._requestTurnstile = function (config) {
+    var self = this;
+    var lang = this.lang;
+    if (this._destroyed || this._turnstileAttempt) return Promise.reject(new Error(lang.errTurnstile));
+    return new Promise(function (resolve, reject) {
+      var settled = false, api = null, widgetId = null, overlay = null, executeBtn = null, started = false;
+      var returnFocus = document.activeElement;
+      var host = h('div', { class: 'rs-turnstile-widget' });
+      var attempt = { statusNodes: [], cancel: function () { finish(null, true); } };
+      self._turnstileAttempt = attempt;
+      document.body.appendChild(host);
+      var currentForm = self.el.querySelector('.rs-form');
+      if (currentForm) currentForm.appendChild(self._buildTurnstileStatus());
+      var timer = setTimeout(function () { finish(null, false); }, 120000);
+
+      function finish(token, cancelled) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        document.removeEventListener('keydown', onKey, true);
+        if (api && widgetId !== null) { try { api.remove(widgetId); } catch (_) {} }
+        host.remove();
+        attempt.statusNodes.forEach(function (node) { node.remove(); });
+        if (overlay) {
+          overlay.remove();
+          if (--turnstileModalLocks === 0) document.body.style.overflow = turnstilePreviousOverflow;
+        }
+        if (self._turnstileAttempt === attempt) self._turnstileAttempt = null;
+        if (overlay && !self._destroyed) {
+          var target = returnFocus && document.body.contains(returnFocus) ? returnFocus : self.el.querySelector('.rs-btn--primary');
+          if (target && target.focus) { try { target.focus(); } catch (_) {} }
+        }
+        if (token) resolve(token);
+        else reject(Object.assign(new Error(cancelled ? lang.turnstileCancelled : lang.errTurnstile), { _kind: 'turnstile' }));
+      }
+      function topModal() {
+        var dialogs = document.querySelectorAll('.rs-turnstile-modal');
+        return overlay && dialogs[dialogs.length - 1] === overlay;
+      }
+      function onKey(e) {
+        if (overlay && !topModal()) return;
+        if (!overlay && document.querySelector('.rs-turnstile-modal')) return;
+        if (!overlay && !self.el.contains(document.activeElement)) return;
+        if (e.key === 'Escape') { e.preventDefault(); finish(null, true); }
+        if (e.key === 'Tab' && overlay) {
+          var buttons = overlay.querySelectorAll('button, a[href], iframe');
+          if (!buttons.length) return;
+          var first = buttons[0], last = buttons[buttons.length - 1];
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      }
+      function showDialog() {
+        if (settled || overlay) return;
+        overlay = h('div', { class: 'rs-captcha-overlay rs-turnstile-modal', role: 'dialog',
+          'aria-modal': 'true', 'aria-label': lang.turnstileTitle });
+        copyThemeTokens(self.el, overlay);
+        var cancel = h('button', { type: 'button', class: 'rs-btn rs-btn--ghost rs-turnstile-cancel',
+          text: lang.turnstileCancel, onclick: function () { finish(null, true); } });
+        var actions = h('div', { class: 'rs-captcha-dialog__actions' }, cancel);
+        if (config.mode === 'click') {
+          executeBtn = h('button', { type: 'button', class: 'rs-btn rs-btn--primary rs-turnstile-start',
+            text: lang.turnstileStart, disabled: !api, onclick: execute });
+          actions.appendChild(executeBtn);
+        }
+        overlay.appendChild(h('div', { class: 'rs-captcha-dialog' },
+          h('h3', { class: 'rs-captcha-dialog__title', text: lang.turnstileTitle }),
+          h('p', { class: 'rs-captcha-dialog__hint', text: api ? lang.turnstileVerifying : lang.turnstileLoading }),
+          host,
+          h('a', { class: 'rs-captcha-dialog__hint', href: 'https://www.cloudflare.com/privacypolicy/',
+            target: '_blank', rel: 'noopener noreferrer', text: lang.turnstilePrivacy }), actions));
+        overlay.addEventListener('click', function (e) { if (e.target === overlay) finish(null, true); });
+        if (turnstileModalLocks++ === 0) turnstilePreviousOverflow = document.body.style.overflow || '';
+        document.body.style.overflow = 'hidden';
+        document.body.appendChild(overlay);
+        (executeBtn && !executeBtn.disabled ? executeBtn : cancel).focus();
+      }
+      function execute() {
+        if (settled || started || !api || widgetId === null) return;
+        started = true;
+        if (executeBtn) executeBtn.disabled = true;
+        try { api.execute(widgetId); } catch (_) { finish(null, false); }
+      }
+      document.addEventListener('keydown', onKey, true);
+      if (config.mode === 'click') showDialog();
+      loadTurnstileScript().then(function (loaded) {
+        if (settled || self._destroyed) return;
+        api = loaded;
+        try {
+          widgetId = api.render(host, {
+            sitekey: config.site_key, action: 'comment', execution: 'execute',
+            appearance: config.mode === 'managed' ? 'interaction-only' : 'always',
+            'response-field': false, retry: 'never', 'refresh-expired': 'manual',
+            callback: function (token) {
+              if (!started || typeof token !== 'string' || !token.trim() || token.length > 2048) finish(null, false);
+              else finish(token, false);
+            },
+            'error-callback': function () { finish(null, false); },
+            'expired-callback': function () { finish(null, false); },
+            'timeout-callback': function () { finish(null, false); },
+            'before-interactive-callback': function () {
+              // Invisible keys never require interaction. A wrong Managed key
+              // fails visibly instead of concealing an interactive iframe.
+              if (config.mode === 'invisible') finish(null, false);
+              else showDialog();
+            }
+          });
+          if (settled) { try { api.remove(widgetId); } catch (_) {} return; }
+          if (executeBtn) { executeBtn.disabled = false; executeBtn.focus(); }
+          if (config.mode !== 'click') execute();
+        } catch (_) { finish(null, false); }
+      }).catch(function () { finish(null, false); });
+    });
+  };
+
   /**
    * 单次探测服务端验证码开关：成功写入 this.captcha 并置 configOk，
    * 失败保留上一份配置并记录支持状态；永不 reject，以 true/false 结算。
@@ -1575,6 +1771,7 @@
       })]);
     }
     return operation.then(function (data) {
+      if (self._destroyed) return false;
       if (probeVersion !== self._configProbeVersion) return self.captcha.configOk;
       if (!data || !data.pow || !data.image) throw new Error('Invalid config');
       var imageEnabled = !!data.image.enabled;
@@ -1582,6 +1779,22 @@
       self.captcha.pow.enabled = !!data.pow.enabled;
       self.captcha.pow.difficulty = typeof data.pow.difficulty === 'number' ? data.pow.difficulty : 4;
       self.captcha.image.enabled = imageEnabled;
+      var turnstile = data.turnstile;
+      if (turnstile && turnstile.enabled &&
+          (['managed', 'invisible', 'click'].indexOf(turnstile.mode) < 0 ||
+           typeof turnstile.site_key !== 'string' || !turnstile.site_key.trim())) {
+        throw new Error('Invalid Turnstile config');
+      }
+      var previousTurnstile = self.captcha.turnstile;
+      self.captcha.turnstile = {
+        enabled: !!(turnstile && turnstile.enabled),
+        mode: turnstile && turnstile.mode || 'managed',
+        site_key: turnstile && turnstile.site_key || ''
+      };
+      if (self._turnstileAttempt && previousTurnstile &&
+          (previousTurnstile.enabled !== self.captcha.turnstile.enabled ||
+           previousTurnstile.mode !== self.captcha.turnstile.mode ||
+           previousTurnstile.site_key !== self.captcha.turnstile.site_key)) self._turnstileAttempt.cancel();
       self.captcha.replyNotificationEnabled = !!data.reply_notification_enabled;
       self.captcha.commentMaxLength = Number.isSafeInteger(data.comment_max_length) && data.comment_max_length >= 0
         ? data.comment_max_length : 10000;
@@ -1769,11 +1982,13 @@
 
     var resolveRef = null;
     function close(result) {
+      if (self._captchaModal !== overlay) return;
       document.removeEventListener('keydown', onKey, true);
       if (self.captcha.onImageChange === paintImage) self.captcha.onImageChange = null;
       if (prevOverflow !== null) document.body.style.overflow = prevOverflow;
       overlay.remove();
       self._captchaModal = null;
+      self._closeCaptchaModal = null;
       if (returnFocusEl && returnFocusEl.focus) { try { returnFocusEl.focus(); } catch (_) {} }
       if (resolveRef) resolveRef(result);
     }
@@ -1807,6 +2022,7 @@
 
     document.body.appendChild(overlay);
     this._captchaModal = overlay;
+    this._closeCaptchaModal = close;
     input.focus();
 
     return new Promise(function (resolve) { resolveRef = resolve; });
@@ -2225,6 +2441,7 @@
       disabled: !!(this.state.submitting || this.state.powComputing)
     });
     form.appendChild(h('div', { class: 'rs-form__actions' }, hint, submitBtn));
+    if (this._turnstileAttempt) form.appendChild(this._buildTurnstileStatus());
 
     // 持有引用便于读值
     form._rs_refs = {
@@ -2489,6 +2706,7 @@
 
   Rustaline.prototype._handleSubmit = function (form) {
     var self = this;
+    if (this._destroyed) return;
     var refs = form._rs_refs || {};
     var lang = this.lang;
 
@@ -2548,6 +2766,7 @@
     // 按探测到的开关继续：图形码弹框收集 / 直接进入 PoW 与提交
     // 按当前 DOM 取按钮引用；异步图片加载可能重建表单。
     var proceed = function () {
+      if (self._destroyed) return;
       var maxLength = self.captcha.commentMaxLength == null ? 10000 : self.captcha.commentMaxLength;
       if (Array.from(comment).length > maxLength) {
         var currentForm = self.el.querySelector('.rs-form');
@@ -2559,6 +2778,7 @@
         self.state.powComputing = true;
         if (submitBtn) submitBtn.disabled = true;
         self._openCaptchaModal(submitBtn).then(function (code) {
+          if (self._destroyed) return;
           self.state.powComputing = false;
           var currentButton = self.el.querySelector('.rs-form .rs-btn--primary');
           if (currentButton) {
@@ -2580,6 +2800,7 @@
     var activeButton = form.querySelector('.rs-btn--primary');
     if (activeButton) activeButton.disabled = true;
     this._probeCaptchaConfig(5000).then(function (ok) {
+      if (self._destroyed) return;
       self.state.powComputing = false;
       if (activeButton) {
         activeButton.disabled = false;
@@ -2600,6 +2821,7 @@
    */
   Rustaline.prototype._continueSubmit = function (body, optimistic, ctx) {
     var self = this;
+    if (this._destroyed) return;
     var lang = this.lang;
     var comment = ctx.comment;
     var replyTarget = ctx.replyTarget;
@@ -2613,10 +2835,10 @@
 
     // PoW 在乐观插入之前计算（可能耗时数百毫秒～数秒，避免用户先看到「已发出」假象）。
     // 计算期间按钮展示「安全校验计算中…」并禁用
-    if (this.captcha.pow.enabled) {
-      this.state.powComputing = true;
-      this._render();
-    }
+    this.state.powComputing = true;
+    this._render();
+    var stage = 'pow';
+    var turnstile = this.captcha.turnstile;
 
     var powPromise = this.captcha.pow.enabled
       ? this._solvePow(this.captcha.pow.difficulty)
@@ -2624,19 +2846,32 @@
 
     powPromise
       .then(function (solution) {
+        if (self._destroyed) return;
         if (solution) body.pow = solution;
+        if (turnstile && turnstile.enabled) {
+          stage = 'turnstile';
+          return self._requestTurnstile(turnstile);
+        }
+        return null;
+      })
+      .then(function (token) {
+        if (self._destroyed) return;
+        if (turnstile && turnstile.enabled && !token) throw new Error(lang.errTurnstile);
+        if (token) body.turnstile_token = token;
         self._dispatchSubmission(body, optimistic, {
           comment: comment,
           draftComment: ctx.draftComment,
           replyTarget: replyTarget
         });
       })
-      .catch(function () {
+      .catch(function (err) {
+        if (stage === 'turnstile') self._clearImageCaptcha();
+        if (self._destroyed) return;
         // 计算失败：恢复按钮态，提示用户重试（不插入乐观评论）
         self.state.powComputing = false;
         self._render();
         var formNow = self.el.querySelector('.rs-form');
-        if (formNow) self._showFormError(formNow, lang.errPow);
+        if (formNow) self._showFormError(formNow, stage === 'turnstile' ? (err.message || lang.errTurnstile) : lang.errPow);
       });
   };
 
@@ -2646,12 +2881,15 @@
    */
   Rustaline.prototype._dispatchSubmission = function (body, optimistic, ctx) {
     var self = this;
+    if (this._destroyed) return;
     var lang = this.lang;
     var replyTarget = ctx.replyTarget;
 
     // 清空评论框 + 退出回复模式
-    if (this.draft.comment.trim() === ctx.comment) this.draft.comment = '';
-    this.state.replyTo = null;
+    var clearedReply = this.state.replyTo === (replyTarget || null) || (this.state.replyTo == null && !replyTarget);
+    var clearedDraft = clearedReply && this.draft.comment.trim() === ctx.comment;
+    if (clearedDraft) this.draft.comment = '';
+    if (clearedReply) this.state.replyTo = null;
 
     var optimisticInserted = false;
     function rollbackOptimistic() {
@@ -2714,7 +2952,10 @@
           return res.json().then(function (j) {
             var msg = (j && (j.message || j.error)) || lang.errGeneric;
             var kind = 'http';
-            if (/pow|challenge/i.test(msg)) {
+            if (/turnstile/i.test(msg)) {
+              kind = 'turnstile';
+              msg = lang.errTurnstile;
+            } else if (/pow|challenge/i.test(msg)) {
               kind = 'pow';
               msg = lang.errPow;
             } else if (/captcha/i.test(msg)) {
@@ -2729,6 +2970,7 @@
         return res.json();
       })
       .then(function (created) {
+        if (self._destroyed) return;
         // 图形码凭证已被服务端消费（校验通过即删），清空本地缓存，
         // 避免下次提交弹框复用已作废的旧图（H-8）
         self._clearImageCaptcha();
@@ -2774,21 +3016,25 @@
         setTimeout(function () { self._refreshLoadedPages(); }, 400);
       })
       .catch(function (err) {
+        if (self._destroyed) return;
         // 乐观插入回滚（保持表单草稿，让用户能改后重发）
         rollbackOptimistic();
         self.state.submitting = false;
         self.state.powComputing = false;
-        self.state.replyTo = replyTarget; // 恢复回复上下文，方便重试
-        if (!self.draft.comment) self.draft.comment = ctx.draftComment || ctx.comment; // Preserve a newer draft.
+        if (clearedDraft && !self.draft.comment && (!self.state.replyTo || self.state.replyTo === replyTarget)) {
+          self.draft.comment = ctx.draftComment || ctx.comment;
+          if (clearedReply && !self.state.replyTo) self.state.replyTo = replyTarget;
+        }
         self._render();
 
         var kind = err && err._kind;
         // Refresh failed verification but never automatically repeat the POST.
-        if (kind === 'captcha' || kind === 'pow') {
+        if (kind === 'captcha' || kind === 'pow' || kind === 'turnstile') {
           self._clearImageCaptcha();
           self.state.powComputing = true;
           self._render();
           self._probeCaptchaConfig(5000).then(function (ok) {
+            if (self._destroyed) return;
             self.state.powComputing = false;
             self._render();
             var retryForm = self.el.querySelector('.rs-form');
@@ -2843,6 +3089,9 @@
 
   /** 销毁实例：清空挂载点，移除主题样式与系统明暗监听 */
   Rustaline.prototype.destroy = function () {
+    this._destroyed = true;
+    if (this._turnstileAttempt) this._turnstileAttempt.cancel();
+    if (this._closeCaptchaModal) this._closeCaptchaModal(null);
     this.el.innerHTML = '';
     this.el.classList.remove('rs-root');
     this.el.classList.remove('rs-dark');

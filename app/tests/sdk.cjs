@@ -71,5 +71,6 @@ const flush = ()=>new Promise(resolve=>setTimeout(resolve,20));
   ({sdk}=setup());assert.equal(await sdk._probeCaptchaConfig(5000),true);
   assert.equal(sdk.captcha.commentMaxLength,10000,'未提供正文上限的旧配置响应兼容默认10000');
   assert.deepEqual(Object.keys(Rustaline.langs['zh-CN']).sort(),Object.keys(Rustaline.langs.en).sort());
+  await require('./turnstile-sdk.cjs')();
   console.log('SDK 回归：动态刷新、失败保留草稿、旧服务端兼容、通知偏好、配置无重绘、body限时、验证码失败不重复POST、新草稿保护、动态正文上限、Unicode码点、自定义字典、双语字典通过');
 })().catch(err=>{console.error(err);process.exitCode=1});
