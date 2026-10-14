@@ -47,6 +47,10 @@ const SECTIONS = [
   ["account", "settings.accountSecurity", "settings.accountDescription", []],
 ];
 
+function settingLabel(group, key) {
+  return t(`settings.field.${group === "turnstile" ? "turnstile_" : ""}${key}`);
+}
+
 export function renderRuntimeSettings(initial, accountCard) {
   let cfg = initial;
   let busy = false;
@@ -82,7 +86,7 @@ export function renderRuntimeSettings(initial, accountCard) {
 
   function createField(group, folder, descriptor) {
     const [key, type, min, max] = descriptor;
-    const label = t(`settings.field.${group === "turnstile" ? "turnstile_" : ""}${key}`);
+    const label = settingLabel(group, key);
     let control;
     if (type === "switch") {
       control = el("mdui-switch", { class: "settings-switch", attrs: { "aria-label": label } });
@@ -227,7 +231,7 @@ export function renderRuntimeSettings(initial, accountCard) {
         const value = Number(raw);
         if (!raw || !Number.isSafeInteger(value) || value < min || (max != null && value > max)) {
           selectFolder(folder);
-          throw new Error(t("settings.invalidNumber", { field: t(`settings.field.${key}`) }));
+          throw new Error(t("settings.invalidNumber", { field: settingLabel(group, key) }));
         }
         result[key] = value;
       } else if (type === "lines") {
@@ -236,7 +240,7 @@ export function renderRuntimeSettings(initial, accountCard) {
       if (control.checkValidity && !control.checkValidity()) {
         selectFolder(folder);
         control.reportValidity();
-        throw new Error(t("settings.invalidField", { field: t(`settings.field.${key}`) }));
+        throw new Error(t("settings.invalidField", { field: settingLabel(group, key) }));
       }
     }
     return result;
