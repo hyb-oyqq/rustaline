@@ -6,6 +6,7 @@ use sea_orm::DatabaseConnection;
 use crate::config::AppConfig;
 use crate::middleware::rate_limit::RateLimiter;
 use crate::services::captcha_service::CaptchaMemoryStore;
+use crate::services::turnstile_service::TurnstileVerifier;
 
 /// 全局应用状态。redis 为 None 表示黑名单未启用且启动时 Redis 不可达（降级运行）。
 /// 管理员凭据不在此驻留：唯一管理员落库（admins 表），认证时查库校验（auth/admin.rs）。
@@ -25,4 +26,6 @@ pub struct AppState {
     pub captcha_memory: Arc<CaptchaMemoryStore>,
     /// PoW challenge HMAC 签名密钥（captcha.secret 缺省时由 jwt.secret 派生），启动时计算一次
     pub captcha_signing_key: Arc<Vec<u8>>,
+    /// 共享 HTTP 连接池；验证地址固定，不接受请求或业务配置覆盖。
+    pub turnstile: TurnstileVerifier,
 }

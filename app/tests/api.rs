@@ -114,6 +114,7 @@ async fn build_app(redis_url: Option<String>, blacklist_enabled: bool) -> Router
         image_issue_rate_limiter: RateLimiter::new(),
         captcha_memory: app::services::captcha_service::CaptchaMemoryStore::new(),
         captcha_signing_key,
+        turnstile: app::services::turnstile_service::TurnstileVerifier::new().unwrap(),
     })
 }
 
@@ -161,6 +162,7 @@ async fn build_app_state_with_config(config: AppConfig) -> (Router, AppState) {
         image_issue_rate_limiter: RateLimiter::new(),
         captcha_memory: app::services::captcha_service::CaptchaMemoryStore::new(),
         captcha_signing_key,
+        turnstile: app::services::turnstile_service::TurnstileVerifier::new().unwrap(),
     };
     (create_router(state.clone()), state)
 }

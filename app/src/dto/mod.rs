@@ -13,7 +13,7 @@ pub use settings::{
 pub use auth::{ChangePasswordRequest, LoginRequest, LoginResponse};
 pub use captcha::{
     CaptchaConfigResponse, ImageCaptchaConfigInfo, ImageCaptchaResponse, PowChallengeResponse,
-    PowConfigInfo, PowSolution,
+    PowConfigInfo, PowSolution, TurnstileConfigInfo,
 };
 pub use comment::{
     AdminCommentListResponse, AdminCommentParent, AdminCommentQuery, AdminCommentResponse,

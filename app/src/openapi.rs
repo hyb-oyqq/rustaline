@@ -43,6 +43,7 @@ use crate::{dto, handlers};
         dto::CaptchaConfigResponse,
         dto::PowConfigInfo,
         dto::ImageCaptchaConfigInfo,
+        dto::TurnstileConfigInfo,
         dto::PowChallengeResponse,
         dto::ImageCaptchaResponse,
         dto::CommentPublicResponse,
@@ -74,7 +75,7 @@ use crate::{dto, handlers};
         (name = "health", description = "健康检查"),
         (name = "auth", description = "登录 / 登出"),
         (name = "comments", description = "公共评论接口（匿名）"),
-        (name = "captcha", description = "评论验证码（PoW / 图形码，匿名）"),
+        (name = "captcha", description = "评论验证码（PoW / 图形码 / Turnstile，匿名）"),
         (name = "comments-admin", description = "评论管理接口（需认证）"),
         (name = "mail-admin", description = "邮件测试与队列状态（需认证）"),
     )

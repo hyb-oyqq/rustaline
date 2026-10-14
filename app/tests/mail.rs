@@ -361,6 +361,7 @@ async fn create(
         &None,
         &CaptchaMemoryStore::new(),
         &[],
+        &app::services::turnstile_service::TurnstileVerifier::new().unwrap(),
         &config.comment,
         &config.mail,
         payload,
@@ -715,6 +716,7 @@ async fn comment_and_enqueue_rollback_together_on_queue_failure() {
             &None,
             &CaptchaMemoryStore::new(),
             &[],
+            &app::services::turnstile_service::TurnstileVerifier::new().unwrap(),
             &config.comment,
             &config.mail,
             payload,
@@ -791,6 +793,7 @@ async fn mail_http_endpoints_require_authentication_and_expose_expected_status_s
         image_issue_rate_limiter: RateLimiter::new(),
         captcha_memory: CaptchaMemoryStore::new(),
         captcha_signing_key: Arc::new(vec![]),
+        turnstile: app::services::turnstile_service::TurnstileVerifier::new().unwrap(),
     };
     let router = create_router(state);
     for (method, path, body) in [

@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         image_issue_rate_limiter: RateLimiter::new(),
         captcha_memory: app::services::captcha_service::CaptchaMemoryStore::new(),
         captcha_signing_key,
+        turnstile: app::services::turnstile_service::TurnstileVerifier::new()?,
     };
 
     // 6. 构建路由并启动服务

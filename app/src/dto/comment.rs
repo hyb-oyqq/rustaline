@@ -27,6 +27,10 @@ pub struct CommentCreateRequest {
     /// 图形验证码用户输入
     #[serde(default)]
     pub captcha_code: Option<String>,
+    /// Turnstile 单次 token；启用后必填，只由服务端 Siteverify 校验。
+    #[serde(default)]
+    #[schema(max_length = 2048)]
+    pub turnstile_token: Option<String>,
 }
 
 fn default_true() -> bool {
