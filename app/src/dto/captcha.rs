@@ -19,6 +19,16 @@ pub struct CaptchaConfigResponse {
     pub reply_notification_enabled: bool,
     pub pow: PowConfigInfo,
     pub image: ImageCaptchaConfigInfo,
+    pub turnstile: TurnstileConfigInfo,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TurnstileConfigInfo {
+    pub enabled: bool,
+    #[schema(pattern = "^(invisible|managed|click)$")]
+    pub mode: String,
+    /// 关闭时为空；不公开 Secret Key、允许域名和后台密钥状态。
+    pub site_key: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

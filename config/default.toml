@@ -77,6 +77,15 @@ bind_ip = false
 # HMAC 签名密钥；留空则从 jwt.secret 域分离派生。需要独立设置时用 openssl rand -base64 48
 secret = ""
 
+# 首次初始化导入；之后通过管理面板修改。与 PoW、图形码独立，同时开启时均须通过。
+[comment.captcha.turnstile]
+enabled = false
+# invisible / managed / click
+mode = "managed"
+site_key = ""
+secret_key = ""
+hostnames = []
+
 # 管理员账号（唯一用户）没有默认值：APP_INITIAL_ADMIN_USERNAME / APP_INITIAL_ADMIN_PASSWORD
 # （或嵌套写法 APP_INITIAL_ADMIN__USERNAME / APP_INITIAL_ADMIN__PASSWORD）
 # 仅在首次启动、admins 表为空时作为种子写入数据库；入库后被忽略（改密码走管理面板）

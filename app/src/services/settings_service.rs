@@ -8,7 +8,7 @@ use super::{settings_crypto, settings_validation};
 use crate::config::{AppConfig, CommentConfig, MailConfig};
 use crate::dto::{
     AdminConfigResponse, CaptchaSettingsResponse, CommentConfigResponse, MailSettingsResponse,
-    SettingsPatchRequest,
+    SettingsPatchRequest, TurnstileSettingsResponse,
 };
 use crate::entities::app_settings;
 use crate::error::AppError;
@@ -20,6 +20,7 @@ pub struct SettingsSnapshot {
     pub comment: CommentConfig,
     pub mail: MailConfig,
     pub password_needs_reset: bool,
+    pub turnstile_secret_needs_reset: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -45,8 +46,16 @@ fn decode(row: &app_settings::Model, jwt_secret: &str) -> Result<SettingsSnapsho
     let mut content: Content = serde_json::from_str(&row.content).map_err(AppError::internal)?;
     // 即使数据库被手工编辑，也不允许业务 JSON 覆盖部署密钥或提供明文密码。
     content.comment.captcha.secret.clear();
+    content.comment.captcha.turnstile.secret_key.clear();
     content.mail.password.clear();
     let mut password_needs_reset = false;
+    let mut turnstile_secret_needs_reset = false;
+    if let Some(ciphertext) = &row.turnstile_secret_ciphertext {
+        match settings_crypto::decrypt_turnstile(ciphertext, jwt_secret) {
+            Some(secret) => content.comment.captcha.turnstile.secret_key = secret,
+            None => turnstile_secret_needs_reset = true,
+        }
+    }
     if let Some(ciphertext) = &row.smtp_password_ciphertext {
         match settings_crypto::decrypt(ciphertext, jwt_secret) {
             Some(password) => content.mail.password = password,
@@ -58,6 +67,7 @@ fn decode(row: &app_settings::Model, jwt_secret: &str) -> Result<SettingsSnapsho
         comment: content.comment,
         mail: content.mail,
         password_needs_reset,
+        turnstile_secret_needs_reset,
     })
 }
 
@@ -70,7 +80,18 @@ pub async fn initialize(
         validate(&snapshot)?;
         return Ok(snapshot);
     }
-    settings_validation::validate(&bootstrap.comment, &bootstrap.mail, false)?;
+    let mut comment = bootstrap.comment.clone();
+    settings_validation::normalize_turnstile(&mut comment.captcha.turnstile)?;
+    settings_validation::validate(&comment, &bootstrap.mail, false)?;
+    settings_validation::validate_turnstile(&comment.captcha.turnstile, false)?;
+    let turnstile_ciphertext = if comment.captcha.turnstile.secret_key.is_empty() {
+        None
+    } else {
+        Some(settings_crypto::encrypt_turnstile(
+            &comment.captcha.turnstile.secret_key,
+            &bootstrap.jwt.secret,
+        )?)
+    };
     let ciphertext = if bootstrap.mail.password.is_empty() {
         None
     } else {
@@ -85,11 +106,12 @@ pub async fn initialize(
         schema_version: Set(1),
         revision: Set(1),
         content: Set(serde_json::to_string(&Content {
-            comment: bootstrap.comment.clone(),
+            comment,
             mail: bootstrap.mail.clone(),
         })
         .map_err(AppError::internal)?),
         smtp_password_ciphertext: Set(ciphertext),
+        turnstile_secret_ciphertext: Set(turnstile_ciphertext),
         created_at: Set(now),
         updated_at: Set(now),
     })
@@ -114,6 +136,10 @@ pub async fn load(db: &DatabaseConnection, jwt_secret: &str) -> Result<SettingsS
 }
 
 pub fn validate(snapshot: &SettingsSnapshot) -> Result<(), AppError> {
+    settings_validation::validate_turnstile(
+        &snapshot.comment.captcha.turnstile,
+        snapshot.turnstile_secret_needs_reset,
+    )?;
     settings_validation::validate(
         &snapshot.comment,
         &snapshot.mail,
@@ -140,6 +166,7 @@ pub async fn update(
         ));
     }
     let mut ciphertext = existing.smtp_password_ciphertext;
+    let mut turnstile_ciphertext = existing.turnstile_secret_ciphertext;
     if let Some(comment) = patch.comment {
         merge!(
             snapshot.comment,
@@ -152,6 +179,29 @@ pub async fn update(
             display_commenter_user_agent
         );
         if let Some(captcha) = comment.captcha {
+            if let Some(turnstile) = captcha.turnstile {
+                if let Some(secret) = turnstile.secret_key.filter(|value| !value.is_empty()) {
+                    // 先校验上限，再加密，避免异常大的输入触发无谓加密分配。
+                    if secret.chars().count() > 4096 {
+                        return Err(AppError::BadRequest(
+                            "turnstile.secret_key exceeds 4096 characters".into(),
+                        ));
+                    }
+                    turnstile_ciphertext =
+                        Some(settings_crypto::encrypt_turnstile(&secret, jwt_secret)?);
+                    snapshot.comment.captcha.turnstile.secret_key = secret;
+                    snapshot.turnstile_secret_needs_reset = false;
+                }
+                merge!(
+                    snapshot.comment.captcha.turnstile,
+                    turnstile,
+                    enabled,
+                    mode,
+                    site_key,
+                    hostnames
+                );
+                settings_validation::normalize_turnstile(&mut snapshot.comment.captcha.turnstile)?;
+            }
             merge!(
                 snapshot.comment.captcha,
                 captcha,
@@ -219,6 +269,10 @@ pub async fn update(
             Expr::value(ciphertext),
         )
         .col_expr(
+            app_settings::Column::TurnstileSecretCiphertext,
+            Expr::value(turnstile_ciphertext),
+        )
+        .col_expr(
             app_settings::Column::UpdatedAt,
             Expr::value(Utc::now().naive_utc()),
         )
@@ -250,6 +304,15 @@ pub fn response(config: &AppConfig, snapshot: &SettingsSnapshot) -> AdminConfigR
             avatar_cdn: c.avatar_cdn.clone(),
             display_commenter_user_agent: c.display_commenter_user_agent,
             captcha: CaptchaSettingsResponse {
+                turnstile: TurnstileSettingsResponse {
+                    enabled: captcha.turnstile.enabled,
+                    mode: captcha.turnstile.mode.clone(),
+                    site_key: captcha.turnstile.site_key.clone(),
+                    hostnames: captcha.turnstile.hostnames.clone(),
+                    secret_configured: snapshot.turnstile_secret_needs_reset
+                        || !captcha.turnstile.secret_key.is_empty(),
+                    secret_needs_reset: snapshot.turnstile_secret_needs_reset,
+                },
                 pow_enabled: captcha.pow_enabled,
                 pow_difficulty: captcha.pow_difficulty,
                 pow_ttl_secs: captcha.pow_ttl_secs,

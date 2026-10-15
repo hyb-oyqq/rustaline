@@ -114,6 +114,7 @@ async fn build_app(redis_url: Option<String>, blacklist_enabled: bool) -> Router
         image_issue_rate_limiter: RateLimiter::new(),
         captcha_memory: app::services::captcha_service::CaptchaMemoryStore::new(),
         captcha_signing_key,
+        turnstile: app::services::turnstile_service::TurnstileVerifier::new().unwrap(),
     })
 }
 
@@ -161,6 +162,7 @@ async fn build_app_state_with_config(config: AppConfig) -> (Router, AppState) {
         image_issue_rate_limiter: RateLimiter::new(),
         captcha_memory: app::services::captcha_service::CaptchaMemoryStore::new(),
         captcha_signing_key,
+        turnstile: app::services::turnstile_service::TurnstileVerifier::new().unwrap(),
     };
     (create_router(state.clone()), state)
 }
@@ -316,6 +318,46 @@ async fn admin_settings_auth_revision_and_nested_updates() {
     assert_eq!(body["pow"]["enabled"], true);
     assert_eq!(body["pow"]["difficulty"], 1);
     assert!(body.get("mail").is_none());
+}
+
+#[tokio::test]
+async fn turnstile_settings_default_and_modes_are_redacted() {
+    let app = build_app(None, false).await;
+    let token = login(&app).await;
+    let (status, body) = call(
+        &app,
+        json_request("GET", "/api/v1/admin/config", None, Some(&token)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let defaults = &body["comment"]["captcha"]["turnstile"];
+    assert_eq!(defaults["enabled"], false);
+    assert_eq!(defaults["mode"], "managed");
+    assert_eq!(defaults["secret_configured"], false);
+    for (index, mode) in ["invisible", "managed", "click"].into_iter().enumerate() {
+        let (status, body) = call(&app, json_request("PATCH", "/api/v1/admin/config", Some(json!({
+            "revision": index + 1, "comment": {"captcha": {"turnstile": {
+                "enabled": true, "mode": mode, "site_key": "site-key",
+                "secret_key": "private-value", "hostnames": [" Comments.Example.com ", "comments.example.com"]
+            }}}
+        })), Some(&token))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let turnstile = &body["comment"]["captcha"]["turnstile"];
+        assert_eq!(turnstile["mode"], mode);
+        assert_eq!(turnstile["hostnames"], json!(["comments.example.com"]));
+        assert_eq!(turnstile["secret_configured"], true);
+        assert_eq!(turnstile["secret_needs_reset"], false);
+        assert!(turnstile.get("secret_key").is_none());
+        assert!(!body.to_string().contains("private-value"));
+    }
+    let (status, public) = call(
+        &app,
+        json_request("GET", "/api/v1/captcha/config", None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!public.to_string().contains("private-value"));
+    assert!(!public.to_string().contains("secret_key"));
 }
 
 #[tokio::test]

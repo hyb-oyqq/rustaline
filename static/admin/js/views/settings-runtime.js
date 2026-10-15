@@ -21,6 +21,10 @@ const SECTIONS = [
       ["image_enabled", "switch"], ["image_ttl_secs", "number", 0, 31536000],
       ["image_max_attempts", "number", 0],
     ]],
+    ["settings.turnstileSection", "turnstile", [
+      ["enabled", "switch"], ["mode", "select", ["invisible", "managed", "click"]],
+      ["site_key", "text", 255], ["hostnames", "lines", 100],
+    ]],
   ]],
   ["smtp", "settings.smtpConnection", "settings.smtpDescription", [
     ["settings.smtpServer", "mail", [
@@ -43,11 +47,15 @@ const SECTIONS = [
   ["account", "settings.accountSecurity", "settings.accountDescription", []],
 ];
 
+function settingLabel(group, key) {
+  return t(`settings.field.${group === "turnstile" ? "turnstile_" : ""}${key}`);
+}
+
 export function renderRuntimeSettings(initial, accountCard) {
   let cfg = initial;
   let busy = false;
   let dirty = false;
-  const fields = { comment: {}, captcha: {}, mail: {} };
+  const fields = { comment: {}, captcha: {}, turnstile: {}, mail: {} };
   const panels = new Map();
   const folders = new Map();
   const wrap = el("div", { class: "settings-workspace" });
@@ -78,7 +86,7 @@ export function renderRuntimeSettings(initial, accountCard) {
 
   function createField(group, folder, descriptor) {
     const [key, type, min, max] = descriptor;
-    const label = t(`settings.field.${key}`);
+    const label = settingLabel(group, key);
     let control;
     if (type === "switch") {
       control = el("mdui-switch", { class: "settings-switch", attrs: { "aria-label": label } });
@@ -86,13 +94,17 @@ export function renderRuntimeSettings(initial, accountCard) {
       control = el("mdui-select", { label, variant: "outlined" });
       for (const option of min) control.appendChild(el("mdui-menu-item", { value: option, text: t(`settings.option.${option}`) }));
     } else {
-      control = el("mdui-text-field", { label, type, variant: "outlined" });
+      control = el("mdui-text-field", { label, type: type === "lines" ? "text" : type, variant: "outlined" });
+      if (type === "lines") {
+        control.rows = 3;
+        control.maxLength = 25600;
+      }
       if (type === "number") {
         control.min = min;
         if (max != null) control.max = max;
         control.step = 1;
         control.required = true;
-      } else control.maxLength = min;
+      } else if (type !== "lines") control.maxLength = min;
     }
     control.dataset.setting = `${group}.${key}`;
     control.addEventListener("input", markDirty);
@@ -101,7 +113,9 @@ export function renderRuntimeSettings(initial, accountCard) {
     const slot = el("div", { class: `settings-field${type === "switch" ? " settings-field--switch" : ""}` });
     if (type === "switch") slot.appendChild(el("label", { class: "settings-switch-row" }, el("span", { text: label }), control));
     else slot.appendChild(control);
-    const hint = key === "rate_limit_per_minute" ? "settings.rateHint"
+    const hint = group === "turnstile" && key === "mode" ? "settings.turnstileModeHint"
+      : group === "turnstile" && key === "hostnames" ? "settings.turnstileHostnamesHint"
+      : key === "rate_limit_per_minute" ? "settings.rateHint"
       : key === "avatar_cdn" ? "settings.hintAvatarCdn" : null;
     if (hint) slot.appendChild(el("div", { class: "settings-hint", text: t(hint) }));
     return slot;
@@ -149,13 +163,28 @@ export function renderRuntimeSettings(initial, accountCard) {
   panels.get("smtp").querySelector(".settings-section:last-child .settings-grid").appendChild(
     el("div", { class: "settings-field settings-password" }, password, passwordState));
 
+  const turnstileSecret = el("mdui-text-field", {
+    label: t("settings.turnstileSecret"), type: "password", variant: "outlined",
+    dataset: { setting: "turnstile.secret_key" }, togglePassword: true,
+    autocomplete: "new-password", maxLength: 4096, supportingText: t("settings.turnstileSecretHint"),
+  });
+  const turnstileState = el("div", { class: "settings-hint settings-password-state", role: "status" });
+  turnstileSecret.addEventListener("input", markDirty);
+  panels.get("captcha").querySelector(".settings-section:last-of-type .settings-grid").appendChild(
+    el("div", { class: "settings-field settings-password" }, turnstileSecret, turnstileState));
+
   const actions = el("div", { class: "settings-savebar" },
     el("div", { class: "settings-savebar__state" }, error, state),
     el("div", { class: "settings-savebar__buttons" }, reload, save));
   form.append(content, actions);
   wrap.append(navigation, form);
 
-  const controls = () => [...Object.values(fields).flatMap(group => Object.values(group).map(field => field.control)), password];
+  const controls = () => [...Object.values(fields).flatMap(group => Object.values(group).map(field => field.control)), password, turnstileSecret];
+
+  function groupSource(group) {
+    return group === "turnstile" ? cfg.comment.captcha.turnstile || {}
+      : group === "captcha" ? cfg.comment.captcha : cfg[group];
+  }
   function setBusy(value) {
     busy = value;
     controls().forEach(control => { control.disabled = value; });
@@ -167,15 +196,20 @@ export function renderRuntimeSettings(initial, accountCard) {
   function populate(next, saved = false) {
     cfg = next;
     for (const [group, descriptors] of Object.entries(fields)) {
-      const source = group === "captcha" ? cfg.comment.captcha : cfg[group];
+      const source = groupSource(group);
       for (const [key, { control, type }] of Object.entries(descriptors)) {
         if (type === "switch") control.checked = !!source[key];
-        else control.value = String(source[key] ?? "");
+        else if (type === "lines") control.value = (source[key] || []).join("\n");
+        else control.value = String(source[key] ?? (group === "turnstile" && key === "mode" ? "managed" : ""));
       }
     }
     password.value = "";
     passwordState.textContent = t(cfg.mail.password_needs_reset ? "settings.passwordResetRequired"
       : cfg.mail.password_configured ? "settings.passwordConfigured" : "settings.passwordNotConfigured");
+    turnstileSecret.value = "";
+    const turnstile = groupSource("turnstile");
+    turnstileState.textContent = t(turnstile.secret_needs_reset ? "settings.turnstileSecretResetRequired"
+      : turnstile.secret_configured ? "settings.turnstileSecretConfigured" : "settings.turnstileSecretNotConfigured");
     dirty = false;
     state.textContent = t(saved ? "settings.saved" : "settings.upToDate");
     error.hidden = true;
@@ -184,10 +218,12 @@ export function renderRuntimeSettings(initial, accountCard) {
 
   function readGroup(group) {
     const result = {};
-    const source = group === "captcha" ? cfg.comment.captcha : cfg[group];
+    const source = groupSource(group);
     for (const [key, { control, type, min, max, folder }] of Object.entries(fields[group])) {
       const current = type === "switch" ? !!control.checked : String(control.value ?? "");
-      const previous = type === "switch" ? !!source[key] : String(source[key] ?? "");
+      const previous = type === "switch" ? !!source[key]
+        : type === "lines" ? (source[key] || []).join("\n")
+        : String(source[key] ?? (group === "turnstile" && key === "mode" ? "managed" : ""));
       if (current === previous) continue;
       if (type === "switch") result[key] = !!control.checked;
       else if (type === "number") {
@@ -195,14 +231,16 @@ export function renderRuntimeSettings(initial, accountCard) {
         const value = Number(raw);
         if (!raw || !Number.isSafeInteger(value) || value < min || (max != null && value > max)) {
           selectFolder(folder);
-          throw new Error(t("settings.invalidNumber", { field: t(`settings.field.${key}`) }));
+          throw new Error(t("settings.invalidNumber", { field: settingLabel(group, key) }));
         }
         result[key] = value;
+      } else if (type === "lines") {
+        result[key] = String(control.value ?? "").split(/\r?\n/).map(value => value.trim()).filter(Boolean);
       } else result[key] = String(control.value ?? "").trim();
       if (control.checkValidity && !control.checkValidity()) {
         selectFolder(folder);
         control.reportValidity();
-        throw new Error(t("settings.invalidField", { field: t(`settings.field.${key}`) }));
+        throw new Error(t("settings.invalidField", { field: settingLabel(group, key) }));
       }
     }
     return result;
@@ -214,6 +252,9 @@ export function renderRuntimeSettings(initial, accountCard) {
     try {
       const comment = readGroup("comment");
       const captcha = readGroup("captcha");
+      const turnstile = readGroup("turnstile");
+      if (turnstileSecret.value !== "") turnstile.secret_key = turnstileSecret.value;
+      if (Object.keys(turnstile).length) captcha.turnstile = turnstile;
       if (Object.keys(captcha).length) comment.captcha = captcha;
       const mail = readGroup("mail");
       if (password.value !== "") mail.password = password.value;

@@ -9,4 +9,5 @@ pub mod mail_worker;
 mod settings_crypto;
 pub mod settings_service;
 mod settings_validation;
+pub mod turnstile_service;
 pub mod ua;

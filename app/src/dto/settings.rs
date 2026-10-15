@@ -29,6 +29,7 @@ pub struct CommentSettingsPatch {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CaptchaSettingsPatch {
+    pub turnstile: Option<TurnstileSettingsPatch>,
     pub pow_enabled: Option<bool>,
     #[schema(minimum = 1, maximum = 8)]
     pub pow_difficulty: Option<u32>,
@@ -76,6 +77,7 @@ pub struct MailSettingsPatch {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CaptchaSettingsResponse {
+    pub turnstile: TurnstileSettingsResponse,
     pub pow_enabled: bool,
     pub pow_difficulty: u32,
     pub pow_ttl_secs: u64,
@@ -83,6 +85,31 @@ pub struct CaptchaSettingsResponse {
     pub image_ttl_secs: u64,
     pub image_max_attempts: u32,
     pub bind_ip: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TurnstileSettingsPatch {
+    pub enabled: Option<bool>,
+    #[schema(pattern = "^(invisible|managed|click)$")]
+    pub mode: Option<String>,
+    #[schema(max_length = 255)]
+    pub site_key: Option<String>,
+    /// 只写；省略或空字符串保留现有密钥，不 trim。
+    #[schema(max_length = 4096, write_only)]
+    pub secret_key: Option<String>,
+    #[schema(max_items = 100)]
+    pub hostnames: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TurnstileSettingsResponse {
+    pub enabled: bool,
+    pub mode: String,
+    pub site_key: String,
+    pub hostnames: Vec<String>,
+    pub secret_configured: bool,
+    pub secret_needs_reset: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

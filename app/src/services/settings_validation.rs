@@ -1,8 +1,67 @@
-use crate::config::{CommentConfig, MailConfig, validate_captcha_config};
+use crate::config::{CommentConfig, MailConfig, TurnstileConfig, validate_captcha_config};
 use crate::error::AppError;
 
 fn invalid(message: &str) -> AppError {
     AppError::BadRequest(message.into())
+}
+
+pub(super) fn normalize_turnstile(config: &mut TurnstileConfig) -> Result<(), AppError> {
+    if config.hostnames.len() > 100 {
+        return Err(invalid("turnstile.hostnames must not exceed 100 entries"));
+    }
+    let mut normalized = Vec::new();
+    for raw in &config.hostnames {
+        let hostname = raw.trim().to_ascii_lowercase();
+        if hostname.is_empty()
+            || hostname.len() > 253
+            || hostname.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            return Err(invalid(
+                "turnstile.hostnames must contain valid exact hostnames",
+            ));
+        }
+        if !normalized.contains(&hostname) {
+            normalized.push(hostname);
+        }
+    }
+    config.hostnames = normalized;
+    Ok(())
+}
+
+pub(super) fn validate_turnstile(
+    config: &TurnstileConfig,
+    secret_needs_reset: bool,
+) -> Result<(), AppError> {
+    if !["invisible", "managed", "click"].contains(&config.mode.as_str()) {
+        return Err(invalid("invalid turnstile.mode"));
+    }
+    length(&config.site_key, 255, "turnstile.site_key")?;
+    if config.site_key.chars().any(char::is_whitespace) {
+        return Err(invalid("turnstile.site_key must not contain whitespace"));
+    }
+    if config.secret_key.chars().count() > 4096 {
+        return Err(invalid("turnstile.secret_key exceeds 4096 characters"));
+    }
+    let mut copy = config.clone();
+    normalize_turnstile(&mut copy)?;
+    if config.enabled
+        && (config.site_key.is_empty()
+            || config.hostnames.is_empty()
+            || (config.secret_key.trim().is_empty() && !secret_needs_reset))
+    {
+        return Err(invalid(
+            "enabled Turnstile requires site_key, secret_key and hostnames",
+        ));
+    }
+    Ok(())
 }
 
 fn length(value: &str, max: usize, field: &str) -> Result<(), AppError> {

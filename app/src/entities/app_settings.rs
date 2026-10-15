@@ -9,6 +9,7 @@ pub struct Model {
     pub revision: i64,
     pub content: String,
     pub smtp_password_ciphertext: Option<String>,
+    pub turnstile_secret_ciphertext: Option<String>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }

@@ -4,7 +4,7 @@ use base64::Engine as _;
 
 use crate::dto::{
     CaptchaConfigResponse, ImageCaptchaConfigInfo, ImageCaptchaResponse, PowChallengeResponse,
-    PowConfigInfo,
+    PowConfigInfo, TurnstileConfigInfo,
 };
 use crate::error::AppError;
 use crate::middleware::rate_limit::ClientIp;
@@ -36,6 +36,15 @@ pub async fn get_captcha_config(
         },
         image: ImageCaptchaConfigInfo {
             enabled: c.image_enabled,
+        },
+        turnstile: TurnstileConfigInfo {
+            enabled: c.turnstile.enabled,
+            mode: c.turnstile.mode.clone(),
+            site_key: if c.turnstile.enabled {
+                c.turnstile.site_key.clone()
+            } else {
+                String::new()
+            },
         },
     })
 }

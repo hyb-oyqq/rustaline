@@ -18,9 +18,33 @@
 
 - 评论审核、最大正文长度、默认昵称、头像 CDN 和评论者环境摘要都可以在后台调整。
 - 每 IP 每分钟提交上限为 `0` 时拒绝所有评论提交。
-- PoW 与图形验证码独立开关，同时开启时必须通过两者；默认都开启。
+- PoW、图形验证码与 Cloudflare Turnstile 独立开关，开启的防护必须全部通过；PoW 与图形码默认开启，Turnstile 默认关闭。
 - 验证码有效期最多一年，启用时必须大于零；常用默认值为 PoW 十分钟、图形码五分钟。
 - 已打开页面会在提交前重新获取验证码和正文长度设置，网络错误或校验失败时保留草稿，重试即可。
+
+## Cloudflare Turnstile
+
+在 Cloudflare 控制台创建 Turnstile 组件，将**嵌入评论 SDK 的网站**加入组件允许域名，再进入后台「设置 → 验证码防护 → Cloudflare Turnstile」。填写 Site Key、Secret Key 和允许的网站域名，每行一个 hostname，例如 `blog.example.com`；填写网站域名本身，不包含协议、端口、路径或通配符。评论服务与文章网站使用不同域名时，应填写文章网站的域名。
+
+选择模式后启用并保存，也可以关闭 PoW 与图形码，仅使用 Turnstile。无需 Cloudflare API Token，也无需把网站代理到 Cloudflare。
+
+| 模式 | 评论者看到的行为 | Cloudflare 组件类型 |
+| --- | --- | --- |
+| 隐藏 | 提交时在后台验证，不显示验证组件 | Invisible |
+| 自适应 | 提交时自动验证，需要交互时显示验证对话框 | Managed |
+| 必须点击 | 每次先点击「点击验证」按钮，然后执行验证 | Managed |
+
+「必须点击」由 SDK 的按钮保证主动启动验证；Cloudflare 仍自行判断是否额外要求勾选官方组件。切换隐藏模式时，应同步使用 Invisible 类型组件的密钥；自适应和必须点击使用 Managed 类型组件。切换后台模式不会修改 Cloudflare 控制台中的组件类型。
+
+Secret Key 加密保存在数据库中，界面与 API 不回显。密钥输入框留空会保留已保存的值，输入新密钥才替换。升级旧数据库后 Turnstile 保持关闭，原评论、管理员、邮件设置和其他验证码配置保留。
+
+每次评论提交由后端验证 token、用途 `comment` 与允许的网站域名。token 五分钟内有效且只能使用一次，验证失败、过期或网络故障时保留草稿，用户重新验证后重试；不会绕过校验或自动重复提交。更换 `APP_JWT_SECRET` 导致密钥无法解密时，后台会提示重新填写 Secret Key，受保护的评论提交在修复前不会放行，后台仍可登录修改设置。
+
+新安装可以通过 `[comment.captcha.turnstile]` 配置或 `APP_COMMENT_TURNSTILE_ENABLED`、`APP_COMMENT_TURNSTILE_MODE`、`APP_COMMENT_TURNSTILE_SITE_KEY`、`APP_COMMENT_TURNSTILE_SECRET_KEY`、`APP_COMMENT_TURNSTILE_HOSTNAMES` 首次导入，HOSTNAMES 用逗号分隔；数据库已有设置后这些值不覆盖后台设置。
+
+SDK 在启用后按需加载 Cloudflare 官方脚本。如果接入网站配置了 CSP，应按[官方说明](https://developers.cloudflare.com/turnstile/reference/content-security-policy/)允许 `https://challenges.cloudflare.com` 的 `script-src` 与 `frame-src`，或使用 nonce 配置；后端需要能通过 HTTPS 访问同一域名的 Siteverify API。启用隐藏模式的接入网站应按官方要求在自己的隐私说明中引用 [Turnstile 隐私政策](https://www.cloudflare.com/turnstile-privacy-policy/)。
+
+开发测试可使用 [Cloudflare 官方测试密钥](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)，正式部署使用自身组件密钥和真实站点域名，避免把本地开发域名加入生产允许列表。
 
 ## 配置 SMTP
 

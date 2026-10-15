@@ -96,6 +96,7 @@ pub async fn submit_comment(
         &state.redis,
         &state.captcha_memory,
         &state.captcha_signing_key,
+        &state.turnstile,
         &settings.comment,
         &settings.mail,
         payload,

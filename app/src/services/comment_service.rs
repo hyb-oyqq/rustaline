@@ -237,6 +237,7 @@ pub async fn create_comment(
     redis: &Option<ConnectionManager>,
     captcha_memory: &std::sync::Arc<CaptchaMemoryStore>,
     captcha_signing_key: &[u8],
+    turnstile: &super::turnstile_service::TurnstileVerifier,
     config: &CommentConfig,
     mail: &MailConfig,
     payload: CommentCreateRequest,
@@ -273,6 +274,14 @@ pub async fn create_comment(
         payload.captcha_code.as_deref(),
     )
     .await?;
+
+    turnstile
+        .verify(
+            &config.captcha.turnstile,
+            payload.turnstile_token.as_deref(),
+            &ip,
+        )
+        .await?;
 
     if normalized_url.is_empty() {
         return Err(AppError::BadRequest("url must not be empty".into()));
